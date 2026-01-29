@@ -1,0 +1,20 @@
+{
+  "name": "simplesim",
+  "version": "0.1.0",
+  "description": "AI-powered site generation platform - Bring Your Own Keys",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "db:migrate": "supabase db push",
+    "db:reset": "supabase db reset"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "@octokit/rest": "^20.1.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  }
+}

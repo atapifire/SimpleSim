@@ -1,0 +1,117 @@
+/* Custom Animations & Transitions */
+
+.animate-float {
+    animation: float 6s ease-in-out infinite;
+}
+
+@keyframes float {
+    0% { transform: translateY(0px); }
+    50% { transform: translateY(-10px); }
+    100% { transform: translateY(0px); }
+}
+
+/* History Panel Slide Animation */
+.slide-up-enter {
+    transform: translateY(100%);
+}
+.slide-up-enter-active {
+    transform: translateY(0);
+    transition: transform 300ms ease-out;
+}
+.slide-up-exit {
+    transform: translateY(0);
+}
+.slide-up-exit-active {
+    transform: translateY(100%);
+    transition: transform 300ms ease-in;
+}
+
+/* Loader */
+.loader {
+    width: 48px;
+    height: 48px;
+    border: 5px solid #FFF;
+    border-bottom-color: #3b82f6;
+    border-radius: 50%;
+    display: inline-block;
+    box-sizing: border-box;
+    animation: rotation 1s linear infinite;
+}
+
+@keyframes rotation {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Custom Scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+    width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 3px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+/* Markdown-like styling for commit messages */
+.commit-msg {
+    font-family: 'Fira Code', monospace;
+}
+
+/* Smooth textarea expansion */
+#prompt-input {
+    transition: height 0.1s ease;
+}
+
+/* Active Mic Animation */
+.mic-active {
+    color: #ef4444 !important;
+    animation: pulse 1.5s infinite;
+}
+
+/* Radio Button Selection Styling */
+input[type="radio"]:checked + div + .selected-indicator {
+    opacity: 1;
+}
+
+input[type="radio"]:checked + div .text-gray-200 {
+    color: #60a5fa; /* blue-400 */
+}
+
+input[type="radio"]:checked ~ div {
+    color: #60a5fa;
+}
+
+/* Modal Animation */
+@keyframes floatIn {
+    0% { opacity: 0; transform: scale(0.95) translateY(10px); }
+    100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.animate-float-in {
+    animation: floatIn 0.2s ease-out forwards;
+}
+
+/* Disabled styling overlay */
+input:disabled ~ div {
+    opacity: 0.5;
+}
+
+@keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+    70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+/* Mobile-Specific Tweaks */
+@media (max-width: 640px) {
+    #bottom-bar-container {
+        padding-bottom: env(safe-area-inset-bottom, 20px);
+    }
+}
