@@ -53,3 +53,12 @@ CREATE TRIGGER on_auth_user_created
 GRANT USAGE ON SCHEMA public TO postgres, anon, authenticated, service_role;
 GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres, service_role;
 GRANT ALL ON profiles TO authenticated;
+
+-- Step 5: Ensure RLS policy allows users to update their own github_access_token
+-- (This should already work with existing "Users can update own profile" policy,
+-- but let's make sure it's there)
+DROP POLICY IF EXISTS "Users can update own profile" ON profiles;
+CREATE POLICY "Users can update own profile"
+    ON profiles FOR UPDATE
+    USING (auth.uid() = id)
+    WITH CHECK (auth.uid() = id);

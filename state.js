@@ -74,13 +74,8 @@ export async function initAuth() {
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.user) {
         state.user = session.user;
-        // Load profile
-        const { data: profile } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', session.user.id)
-            .single();
-        state.profile = profile;
+        // Load profile and save GitHub token if available
+        await loadAndUpdateProfile(session);
     }
 
     state.isAuthLoading = false;
@@ -88,18 +83,55 @@ export async function initAuth() {
 
     // Listen for auth changes
     supabase.auth.onAuthStateChange(async (event, session) => {
+        console.log('[AUTH]', event, session?.user?.id);
+
         if (session?.user) {
             state.user = session.user;
-            const { data: profile } = await supabase
-                .from('profiles')
-                .select('*')
-                .eq('id', session.user.id)
-                .single();
-            state.profile = profile;
+            await loadAndUpdateProfile(session);
         } else {
             state.user = null;
             state.profile = null;
         }
         events.dispatchEvent(new CustomEvent('auth-changed'));
     });
+}
+
+// Helper to load profile and save GitHub token
+async function loadAndUpdateProfile(session) {
+    const userId = session.user.id;
+
+    // Load current profile
+    const { data: profile, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single();
+
+    if (error) {
+        console.error('[AUTH] Failed to load profile:', error);
+        state.profile = null;
+        return;
+    }
+
+    state.profile = profile;
+
+    // If we have a provider token from GitHub OAuth, save it to the profile
+    // This token is needed for GitHub API operations (create repo, commit)
+    const providerToken = session.provider_token;
+
+    if (providerToken && providerToken !== profile.github_access_token) {
+        console.log('[AUTH] Saving GitHub access token to profile');
+
+        const { error: updateError } = await supabase
+            .from('profiles')
+            .update({ github_access_token: providerToken })
+            .eq('id', userId);
+
+        if (updateError) {
+            console.error('[AUTH] Failed to save GitHub token:', updateError);
+        } else {
+            state.profile.github_access_token = providerToken;
+            console.log('[AUTH] GitHub token saved successfully');
+        }
+    }
 }
