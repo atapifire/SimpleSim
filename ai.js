@@ -667,7 +667,61 @@ export async function checkCredits() {
 }
 
 /**
- * Fetch models, optionally filtered by free tier
+ * Detect if a model supports tool calling from API response
+ * OpenRouter returns supported_parameters array with "tools" for tool-capable models
+ */
+function detectToolSupport(model) {
+    // Check supported_parameters from API
+    const supportedParams = model.supported_parameters || [];
+    if (supportedParams.includes('tools') || supportedParams.includes('tool_choice')) {
+        return 'full';
+    }
+
+    // Check architecture hints
+    const arch = model.architecture || {};
+    if (arch.tool_calling === true) {
+        return 'full';
+    }
+
+    // Fallback: check model ID patterns for known tool-capable models
+    const id = (model.id || '').toLowerCase();
+
+    // Models with FULL tool support
+    const fullToolSupport = [
+        'claude-3', 'claude-sonnet', 'claude-opus', 'claude-haiku',
+        'gpt-4', 'gpt-3.5-turbo',
+        'gemini-1.5', 'gemini-2', 'gemini-pro',
+        'mistral-large', 'mistral-medium',
+        'command-r',
+        'deepseek-chat', 'deepseek-coder'
+    ];
+
+    if (fullToolSupport.some(p => id.includes(p))) {
+        return 'full';
+    }
+
+    // Models with PARTIAL/limited tool support
+    const partialToolSupport = [
+        'mixtral',
+        'mistral-small',
+        'codestral'
+    ];
+
+    if (partialToolSupport.some(p => id.includes(p))) {
+        return 'partial';
+    }
+
+    // Free models generally don't support tools
+    if (id.includes(':free')) {
+        return 'none';
+    }
+
+    // Unknown - assume none for safety
+    return 'none';
+}
+
+/**
+ * Fetch models with capability information
  */
 export async function fetchModelsWithCredits() {
     const key = security.getKey();
@@ -690,14 +744,25 @@ export async function fetchModelsWithCredits() {
         let models = modelsData.data || [];
         devLog('Total models from API:', models.length);
 
+        // Enrich models with tool support info
+        models = models.map(m => ({
+            ...m,
+            toolSupport: detectToolSupport(m),
+            isFree: m.pricing?.prompt === "0" || m.pricing?.prompt === 0 ||
+                    String(m.pricing?.prompt) === "0" || m.id.includes(':free')
+        }));
+
+        // Log tool support stats
+        const toolStats = {
+            full: models.filter(m => m.toolSupport === 'full').length,
+            partial: models.filter(m => m.toolSupport === 'partial').length,
+            none: models.filter(m => m.toolSupport === 'none').length
+        };
+        devLog('Tool support stats:', toolStats);
+
         if (creditsInfo?.isFreeTier) {
             const beforeFilter = models.length;
-            models = models.filter(m =>
-                m.pricing?.prompt === "0" ||
-                m.pricing?.prompt === 0 ||
-                String(m.pricing?.prompt) === "0" ||
-                m.id.includes(':free')
-            );
+            models = models.filter(m => m.isFree);
             devLog(`Free tier: filtered ${beforeFilter} → ${models.length} free models`);
         } else {
             devLog('Paid tier or unlimited: showing all', models.length, 'models');
@@ -710,5 +775,43 @@ export async function fetchModelsWithCredits() {
     }
 }
 
+/**
+ * Check if a model ID supports tool calling
+ * Used by agent.js to validate model before running
+ */
+export function checkModelToolSupport(modelId) {
+    const id = (modelId || '').toLowerCase();
+
+    // Free models don't support tools
+    if (id.includes(':free')) {
+        return 'none';
+    }
+
+    // Full support
+    const fullSupport = [
+        'claude-3', 'claude-sonnet', 'claude-opus', 'claude-haiku',
+        'gpt-4', 'gpt-3.5-turbo',
+        'gemini-1.5', 'gemini-2', 'gemini-pro',
+        'mistral-large', 'mistral-medium',
+        'command-r',
+        'deepseek-chat', 'deepseek-coder'
+    ];
+
+    if (fullSupport.some(p => id.includes(p))) {
+        return 'full';
+    }
+
+    // Partial support
+    const partialSupport = ['mixtral', 'mistral-small', 'codestral'];
+    if (partialSupport.some(p => id.includes(p))) {
+        return 'partial';
+    }
+
+    return 'none';
+}
+
 // Re-export for use in other modules
 export { analyzeProjectHealth, formatTokenCount } from './tokens.js';
+
+// Export tool support check for agent.js
+export { checkModelToolSupport };

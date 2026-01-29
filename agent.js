@@ -7,6 +7,7 @@ import { state } from './state.js';
 import { security } from './security.js';
 import { thinking, devLog, devError } from './thinking.js';
 import { analyzeProjectHealth, generateCodeMap, estimateTokens, formatTokenCount } from './tokens.js';
+import { checkModelToolSupport } from './ai.js';
 
 // Agent configuration
 const MAX_ITERATIONS = 10;
@@ -249,7 +250,9 @@ export async function runAgent(prompt, currentFiles) {
 
     // Check if model supports tool calling
     const modelId = state.settings.openRouterModel;
-    if (!supportsToolCalling(modelId)) {
+    const toolSupport = getToolSupportLevel(modelId);
+
+    if (toolSupport === 'none') {
         const errorMsg = `Agent Mode requires a model with tool support.\n\n"${modelId}" doesn't support tools.\n\nSwitch to Simple Mode, or select a model like Claude, GPT-4, or Gemini Pro.`;
         thinking.show();
         thinking.setStatus('error', 'Model does not support Agent Mode');
@@ -266,9 +269,17 @@ export async function runAgent(prompt, currentFiles) {
     if (!key) throw new Error("OpenRouter Key Locked or Missing");
 
     thinking.show();
-    thinking.setStatus('thinking', 'Agent starting...');
+
+    // Warn about partial support
+    if (toolSupport === 'partial') {
+        thinking.setStatus('thinking', 'Agent starting (limited tool support)...');
+        thinking.log('warning', `${modelId} has limited tool support - results may vary`);
+    } else {
+        thinking.setStatus('thinking', 'Agent starting...');
+    }
+
     devLog('Agent mode:', isNewProject ? 'NEW PROJECT' : 'MODIFY EXISTING');
-    devLog('Model supports tools:', modelId);
+    devLog('Model tool support:', toolSupport, modelId);
 
     // Build initial messages
     const messages = [
@@ -484,52 +495,18 @@ async function callOpenRouterWithTools(messages, key) {
 
 /**
  * Check if the current model supports tool calling
- * Free tier models generally don't support tools
+ * Uses centralized check from ai.js
  */
 export function supportsToolCalling(modelId) {
-    const lowerModelId = modelId.toLowerCase();
+    const support = checkModelToolSupport(modelId);
+    return support === 'full' || support === 'partial';
+}
 
-    // Free models DON'T support tool calling
-    if (lowerModelId.includes(':free')) {
-        return false;
-    }
-
-    // Models known to support tool calling
-    const supportedPatterns = [
-        'gpt-4',
-        'gpt-3.5-turbo',
-        'claude-3',
-        'claude-2',
-        'gemini-pro',
-        'gemini-1.5',
-        'mistral-large',
-        'mistral-medium',
-        'mixtral-8x22b',
-        'command-r',
-        'deepseek-chat',
-        'deepseek-coder'
-    ];
-
-    // Models known to NOT support tool calling
-    const unsupportedPatterns = [
-        'llama',
-        'qwen',
-        'yi-',
-        'phi-',
-        'gemma',
-        'openchat',
-        'nous-',
-        'mythomist',
-        'toppy'
-    ];
-
-    // Check unsupported first
-    if (unsupportedPatterns.some(pattern => lowerModelId.includes(pattern))) {
-        return false;
-    }
-
-    // Check supported
-    return supportedPatterns.some(pattern => lowerModelId.includes(pattern));
+/**
+ * Get detailed tool support level
+ */
+export function getToolSupportLevel(modelId) {
+    return checkModelToolSupport(modelId);
 }
 
 /**

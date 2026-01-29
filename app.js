@@ -477,18 +477,58 @@ function renderModelList(models) {
         return;
     }
 
-    list.innerHTML = models.map(m => {
+    // Sort: tool-capable models first when in Agent mode
+    const isAgentMode = state.settings.agentMode;
+    const sortedModels = [...models].sort((a, b) => {
+        if (isAgentMode) {
+            // Prioritize tool-capable models
+            const aTools = a.toolSupport === 'full' ? 2 : a.toolSupport === 'partial' ? 1 : 0;
+            const bTools = b.toolSupport === 'full' ? 2 : b.toolSupport === 'partial' ? 1 : 0;
+            if (bTools !== aTools) return bTools - aTools;
+        }
+        return a.name.localeCompare(b.name);
+    });
+
+    list.innerHTML = sortedModels.map(m => {
         const isSelected = m.id === state.settings.openRouterModel;
-        const isFree = m.pricing?.prompt === "0" || m.pricing?.prompt === 0 || m.id.includes(':free');
+        const toolSupport = m.toolSupport || 'none';
+
+        // Tool support indicator
+        let toolBadge = '';
+        let toolTitle = '';
+        if (toolSupport === 'full') {
+            toolBadge = '<span class="text-[9px] px-1 py-0.5 rounded bg-purple-900/30 text-purple-400 border border-purple-900/30" title="Full Agent Mode support">🤖</span>';
+            toolTitle = 'Full tool/function calling support';
+        } else if (toolSupport === 'partial') {
+            toolBadge = '<span class="text-[9px] px-1 py-0.5 rounded bg-yellow-900/30 text-yellow-400 border border-yellow-900/30" title="Partial Agent Mode support">⚠️</span>';
+            toolTitle = 'Limited tool support - may not work perfectly in Agent mode';
+        } else if (isAgentMode) {
+            toolBadge = '<span class="text-[9px] px-1 py-0.5 rounded bg-gray-700/50 text-gray-500 border border-gray-600/30" title="Simple Mode only">⚡</span>';
+            toolTitle = 'No tool support - Simple Mode only';
+        }
+
+        // Dim non-tool models when in Agent mode
+        const dimmed = isAgentMode && toolSupport === 'none';
+        const rowClass = dimmed
+            ? 'opacity-50 hover:opacity-75'
+            : isSelected
+                ? 'bg-blue-900/30 text-blue-200'
+                : 'hover:bg-gray-800 text-gray-300';
 
         return `
-            <div class="model-item p-2 rounded-lg cursor-pointer flex justify-between items-center group transition-colors ${isSelected ? 'bg-blue-900/30 text-blue-200' : 'hover:bg-gray-800 text-gray-300'}" data-model-id="${m.id}">
+            <div class="model-item p-2 rounded-lg cursor-pointer flex justify-between items-center group transition-colors ${rowClass}"
+                 data-model-id="${m.id}"
+                 data-tool-support="${toolSupport}"
+                 title="${toolTitle}">
                 <div class="flex-1 min-w-0">
-                    <div class="text-xs font-medium truncate">${m.name}</div>
+                    <div class="text-xs font-medium truncate flex items-center gap-1.5">
+                        ${m.name}
+                    </div>
                     <div class="text-[10px] text-gray-500 truncate">${m.id}</div>
                 </div>
                 <div class="flex items-center gap-1 ml-2">
-                    ${isFree ? '<span class="text-[9px] px-1.5 py-0.5 rounded bg-green-900/30 text-green-400 border border-green-900/30">FREE</span>' : ''}
+                    ${toolBadge}
+                    ${m.isFree ? '<span class="text-[9px] px-1.5 py-0.5 rounded bg-green-900/30 text-green-400 border border-green-900/30">FREE</span>' : ''}
                     ${isSelected ? '<i class="fa-solid fa-check text-blue-400 text-xs"></i>' : ''}
                 </div>
             </div>
@@ -499,6 +539,27 @@ function renderModelList(models) {
     list.querySelectorAll('.model-item').forEach(item => {
         item.addEventListener('click', () => {
             const modelId = item.dataset.modelId;
+            const toolSupport = item.dataset.toolSupport;
+
+            // If in Agent mode and model doesn't support tools, auto-switch to Simple
+            if (state.settings.agentMode && toolSupport === 'none') {
+                setAgentMode(false);
+                // Update the mode toggle UI
+                const simpleBtn = document.getElementById('btn-simple-mode');
+                const agentBtn = document.getElementById('btn-agent-mode-toggle');
+                const description = document.getElementById('mode-description');
+                if (simpleBtn && agentBtn && description) {
+                    simpleBtn.className = 'flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2 bg-blue-600 text-white shadow-lg';
+                    agentBtn.className = 'flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2 text-gray-400 hover:text-white hover:bg-gray-700/50';
+                    description.textContent = 'Single prompt → instant output (fast)';
+                }
+                showToast(`Switched to Simple Mode (${item.querySelector('.text-xs').textContent} doesn't support Agent)`);
+            } else if (toolSupport === 'partial') {
+                showToast(`⚠️ ${item.querySelector('.text-xs').textContent} has limited Agent support`);
+            } else {
+                showToast(`Model: ${item.querySelector('.text-xs').textContent}`);
+            }
+
             state.settings.openRouterModel = modelId;
             localStorage.setItem('app_settings', JSON.stringify({
                 ...JSON.parse(localStorage.getItem('app_settings') || '{}'),
@@ -506,7 +567,6 @@ function renderModelList(models) {
             }));
             updateModelDisplay();
             document.getElementById('model-dropdown').classList.add('hidden');
-            showToast(`Model: ${item.querySelector('.text-xs').textContent}`);
         });
     });
 }
