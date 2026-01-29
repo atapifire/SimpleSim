@@ -639,20 +639,12 @@ export async function checkCredits() {
 
         const limit = data.data?.limit;
         const usage = data.data?.usage || 0;
-        const apiSaysFreeTier = data.data?.is_free_tier;
 
-        // Use API's is_free_tier if explicitly provided
-        // Otherwise fall back to limit-based detection
-        let isFreeTier;
-        if (typeof apiSaysFreeTier === 'boolean') {
-            // Trust the API's explicit free tier indicator
-            isFreeTier = apiSaysFreeTier;
-        } else {
-            // Fallback: limit of 0 with no usage suggests free tier
-            isFreeTier = limit === 0 && usage === 0;
-        }
+        // Simple rule: if limit is 0, user can only use free models
+        // They have no credits to spend on paid models
+        const isFreeTier = limit === 0;
 
-        devLog('Credit detection:', { limit, usage, apiSaysFreeTier, isFreeTier });
+        devLog('Credit detection:', { limit, usage, isFreeTier });
 
         return {
             credits: limit ?? 0,
