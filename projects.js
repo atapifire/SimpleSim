@@ -1,4 +1,4 @@
-import { state, supabase, events } from './state.js';
+import { state, supabase, events, projectCache } from './state.js';
 import { renderProject } from './renderer.js';
 import { showToast } from './utils.js';
 import { autoCreateRepoIfEnabled, autoCommitIfLinked } from './github.js';
@@ -25,6 +25,8 @@ export function initProjects() {
             fetchProjects();
             if (state.projectId) loadProject(state.projectId);
         } else {
+            // Clear caches on logout
+            projectCache.clearAll();
             state.projects = [];
             renderProjectList();
             resetToNewProject();
@@ -73,9 +75,22 @@ function setupListeners() {
     closeHistory?.addEventListener('click', toggleHistory);
 }
 
-async function fetchProjects() {
+async function fetchProjects(forceRefresh = false) {
     if (!state.user) return;
 
+    // Check cache first (unless forced refresh)
+    if (!forceRefresh) {
+        const cached = projectCache.getProjects();
+        if (cached) {
+            devLog('Using cached projects list');
+            state.projects = cached;
+            renderProjectList();
+            updateCurrentProjectName();
+            return;
+        }
+    }
+
+    devLog('Fetching projects from Supabase...');
     const { data, error } = await supabase
         .from('projects')
         .select('*')
@@ -87,8 +102,12 @@ async function fetchProjects() {
     }
 
     state.projects = data || [];
+    projectCache.setProjects(state.projects); // Cache the result
     renderProjectList();
+    updateCurrentProjectName();
+}
 
+function updateCurrentProjectName() {
     if (state.projectId) {
         const current = state.projects.find(p => p.id === state.projectId);
         if (current) {
@@ -131,6 +150,10 @@ export async function createProject(name) {
 
 export async function createVersion(projectId, { prompt, files, description, modelUsed }) {
     if (!state.user) throw new Error('Not authenticated');
+    if (!projectId) throw new Error('No project ID provided');
+    if (!files || !Array.isArray(files) || files.length === 0) {
+        throw new Error('No files to save');
+    }
 
     devLog('Creating version for project:', projectId);
     devLog('Files to save:', files.map(f => f.path));
@@ -164,16 +187,22 @@ export async function createVersion(projectId, { prompt, files, description, mod
         devError('Error updating project files:', updateError);
     }
 
-    // Add to local versions and re-render
-    state.versions.push({
+    // Create version object
+    const newVersion = {
         id: data.id,
         prompt: data.prompt,
         files: data.files,
         timestamp: new Date(data.created_at),
         description: data.description
-    });
+    };
 
+    // Add to local versions and re-render
+    state.versions.push(newVersion);
     state.currentVersionIndex = state.versions.length - 1;
+
+    // Update cache with new version (avoids full re-fetch)
+    projectCache.addVersionToCache(projectId, newVersion);
+
     devLog('Rendering project with', files.length, 'files');
     renderProject(files);
     updateHistoryUI();
@@ -216,7 +245,13 @@ export function resetToNewProject() {
     toggleProjectMenu(false);
 }
 
-export async function loadProject(id) {
+// Clear all caches (called on logout)
+export function clearProjectCaches() {
+    projectCache.clearAll();
+    devLog('Project caches cleared');
+}
+
+export async function loadProject(id, forceRefresh = false) {
     if (!id || !state.user) return;
     state.projectId = id;
     localStorage.setItem('last_project_id', id);
@@ -229,6 +264,35 @@ export async function loadProject(id) {
     url.searchParams.set('project', id);
     window.history.replaceState({}, '', url);
 
+    // Check cache first for instant load
+    if (!forceRefresh) {
+        const cachedVersions = projectCache.getVersions(id);
+        if (cachedVersions && cachedVersions.length > 0) {
+            devLog('Using cached versions for project:', id);
+            state.versions = cachedVersions.map(r => ({
+                ...r,
+                timestamp: new Date(r.timestamp || r.created_at)
+            }));
+            state.currentVersionIndex = state.versions.length - 1;
+
+            // Use cached files if available for instant render
+            const cachedFiles = projectCache.getCurrentFiles(id);
+            if (cachedFiles) {
+                renderProject(cachedFiles);
+            } else {
+                renderProject(getCurrentFiles());
+            }
+
+            document.getElementById('welcome-screen')?.classList.add('hidden');
+            document.getElementById('project-loader')?.classList.add('hidden');
+            events.dispatchEvent(new CustomEvent('version-changed'));
+            updateHistoryUI();
+            toggleProjectMenu(false);
+            return;
+        }
+    }
+
+    // Show loader for non-cached loads
     state.versions = [];
     state.currentVersionIndex = -1;
     const preview = document.getElementById('site-preview');
@@ -236,6 +300,8 @@ export async function loadProject(id) {
     document.getElementById('project-loader')?.classList.remove('hidden');
     document.getElementById('welcome-screen')?.classList.add('hidden');
     updateHistoryUI();
+
+    devLog('Fetching versions from Supabase for project:', id);
 
     // Fetch versions from Supabase
     const { data, error } = await supabase
@@ -260,9 +326,14 @@ export async function loadProject(id) {
         description: r.description
     }));
 
+    // Cache the versions
+    projectCache.setVersions(id, state.versions);
+
     if (state.versions.length > 0) {
         state.currentVersionIndex = state.versions.length - 1;
-        renderProject(getCurrentFiles());
+        const files = getCurrentFiles();
+        projectCache.setCurrentFiles(id, files); // Cache current files
+        renderProject(files);
         events.dispatchEvent(new CustomEvent('version-changed'));
     } else {
         document.getElementById('welcome-screen')?.classList.remove('hidden');
@@ -361,9 +432,9 @@ function updateHistoryUI() {
     }
 
     list.innerHTML = '';
-    [...state.versions].reverse().forEach((ver, reversedIndex) => {
-        const realIndex = state.versions.length - 1 - reversedIndex;
-        const isActive = realIndex === state.currentVersionIndex;
+    // Display oldest at top, newest at bottom (chronological order)
+    state.versions.forEach((ver, index) => {
+        const isActive = index === state.currentVersionIndex;
         const el = document.createElement('div');
         el.className = `p-3 rounded-lg border cursor-pointer transition-all ${isActive ? 'bg-blue-900/30 border-blue-500' : 'bg-gray-800 border-gray-700 hover:bg-gray-750'}`;
         el.innerHTML = `
@@ -371,11 +442,16 @@ function updateHistoryUI() {
             <div class="font-medium text-sm text-gray-200 mb-1 line-clamp-2">${ver.prompt}</div>
             <div class="text-xs text-gray-500 flex items-center gap-2">${isActive ? '<span class="text-blue-400 font-bold">● Current</span>' : ''}<span>${ver.description || ''}</span></div>`;
         el.addEventListener('click', () => {
-            state.currentVersionIndex = realIndex;
+            state.currentVersionIndex = index;
             renderProject(ver.files);
             updateHistoryUI();
             showToast(`Restored version ${ver.id.substring(0, 8)}`);
         });
         list.appendChild(el);
     });
+
+    // Auto-scroll to show current version (newest at bottom)
+    if (state.currentVersionIndex === state.versions.length - 1) {
+        list.scrollTop = list.scrollHeight;
+    }
 }

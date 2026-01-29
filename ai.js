@@ -291,7 +291,18 @@ async function generateWithOpenRouter(messages) {
     devLog('Messages:', messages.length, 'total');
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => {
+    let timeoutId = null;
+    let lastActivityTime = Date.now();
+
+    // Streaming timeout - abort if no data received for 60 seconds
+    const STREAM_INACTIVITY_TIMEOUT = 60000;
+
+    const resetStreamTimeout = () => {
+        lastActivityTime = Date.now();
+    };
+
+    // Initial connection timeout
+    timeoutId = setTimeout(() => {
         controller.abort();
         devError('Request timed out after', API_TIMEOUT / 1000, 'seconds');
     }, API_TIMEOUT);
@@ -315,6 +326,7 @@ async function generateWithOpenRouter(messages) {
             signal: controller.signal
         });
 
+        // Clear initial timeout, set up streaming inactivity check
         clearTimeout(timeoutId);
 
         if (!response.ok) {
@@ -327,41 +339,56 @@ async function generateWithOpenRouter(messages) {
         thinking.setStatus('generating', 'Receiving response...');
         thinking.clearStream();
 
-        // Handle streaming response
+        // Handle streaming response with inactivity timeout
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let fullContent = '';
         let chunkCount = 0;
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        // Set up inactivity checker
+        const inactivityChecker = setInterval(() => {
+            if (Date.now() - lastActivityTime > STREAM_INACTIVITY_TIMEOUT) {
+                devError('Stream inactivity timeout - no data for 60 seconds');
+                controller.abort();
+                clearInterval(inactivityChecker);
+            }
+        }, 5000);
 
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
 
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.slice(6);
-                    if (data === '[DONE]') continue;
+                resetStreamTimeout(); // Reset on any data received
 
-                    try {
-                        const parsed = JSON.parse(data);
-                        const content = parsed.choices?.[0]?.delta?.content;
-                        if (content) {
-                            fullContent += content;
-                            chunkCount++;
-                            thinking.streamCode(content);
+                const chunk = decoder.decode(value, { stream: true });
+                const lines = chunk.split('\n');
 
-                            if (chunkCount % 50 === 0) {
-                                thinking.log('stream', `${fullContent.length} chars received...`);
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const data = line.slice(6);
+                        if (data === '[DONE]') continue;
+
+                        try {
+                            const parsed = JSON.parse(data);
+                            const content = parsed.choices?.[0]?.delta?.content;
+                            if (content) {
+                                fullContent += content;
+                                chunkCount++;
+                                thinking.streamCode(content);
+
+                                if (chunkCount % 50 === 0) {
+                                    thinking.log('stream', `${fullContent.length} chars received...`);
+                                }
                             }
+                        } catch (e) {
+                            // Skip malformed chunks
                         }
-                    } catch (e) {
-                        // Skip malformed chunks
                     }
                 }
             }
+        } finally {
+            clearInterval(inactivityChecker);
         }
 
         devLog('Streaming complete, total content:', fullContent.length, 'chars');
@@ -377,6 +404,12 @@ async function generateWithOpenRouter(messages) {
         if (!parsed.files || !Array.isArray(parsed.files)) {
             thinking.setStatus('error', 'Invalid response structure');
             throw new Error('Response missing files array');
+        }
+
+        // Validate files have content
+        if (parsed.files.length === 0) {
+            thinking.setStatus('error', 'No files in response');
+            throw new Error('AI returned empty files array');
         }
 
         thinking.setStatus('complete', `Generated ${parsed.files.length} file(s)`);
@@ -402,50 +435,146 @@ async function generateWithOpenRouter(messages) {
 
 /**
  * Parse AI response with multiple fallback strategies
+ * Enhanced to handle various model output formats
  */
 function parseAIResponse(content) {
-    // Strategy 1: Direct JSON parse
+    devLog('Parsing response, length:', content.length);
+
+    // Strategy 1: Direct JSON parse (cleanest case)
     try {
-        return JSON.parse(content);
+        const result = JSON.parse(content);
+        if (validateParsedResult(result)) return result;
     } catch (e) {
         devLog('Direct JSON parse failed, trying fallbacks...');
     }
 
-    // Strategy 2: Extract from markdown code blocks
-    const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-    if (jsonMatch) {
+    // Strategy 2: Extract from markdown code blocks (```json ... ```)
+    const jsonBlockMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+    if (jsonBlockMatch) {
         try {
-            return JSON.parse(jsonMatch[1]);
+            const result = JSON.parse(jsonBlockMatch[1]);
+            if (validateParsedResult(result)) return result;
         } catch (e) {
             devLog('Markdown extraction failed');
         }
     }
 
-    // Strategy 3: Find JSON object boundaries
+    // Strategy 3: Find JSON object with "files" array (most reliable for our format)
+    const filesPattern = /"files"\s*:\s*\[/;
+    const filesMatch = content.match(filesPattern);
+    if (filesMatch) {
+        // Find the starting brace before "files"
+        const beforeFiles = content.substring(0, filesMatch.index);
+        const startBrace = beforeFiles.lastIndexOf('{');
+        if (startBrace !== -1) {
+            // Find matching end brace
+            let depth = 0;
+            let endBrace = -1;
+            for (let i = startBrace; i < content.length; i++) {
+                if (content[i] === '{') depth++;
+                else if (content[i] === '}') {
+                    depth--;
+                    if (depth === 0) {
+                        endBrace = i;
+                        break;
+                    }
+                }
+            }
+            if (endBrace !== -1) {
+                try {
+                    const result = JSON.parse(content.slice(startBrace, endBrace + 1));
+                    if (validateParsedResult(result)) return result;
+                } catch (e) {
+                    devLog('Files pattern extraction failed');
+                }
+            }
+        }
+    }
+
+    // Strategy 4: Find outermost JSON object boundaries
     const jsonStart = content.indexOf('{');
     const jsonEnd = content.lastIndexOf('}');
     if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
         try {
-            return JSON.parse(content.slice(jsonStart, jsonEnd + 1));
+            const result = JSON.parse(content.slice(jsonStart, jsonEnd + 1));
+            if (validateParsedResult(result)) return result;
         } catch (e) {
             devLog('JSON boundary extraction failed');
         }
     }
 
-    // Strategy 4: Try to fix common JSON issues
+    // Strategy 5: Fix common JSON issues
+    let fixedContent = content;
     try {
-        let fixed = content
-            .replace(/,\s*}/g, '}')
-            .replace(/,\s*]/g, ']')
-            .replace(/'/g, '"');
-        return JSON.parse(fixed);
+        // Extract potential JSON first
+        if (jsonStart !== -1 && jsonEnd !== -1) {
+            fixedContent = content.slice(jsonStart, jsonEnd + 1);
+        }
+
+        // Fix common issues
+        fixedContent = fixedContent
+            .replace(/,\s*}/g, '}')           // Trailing commas before }
+            .replace(/,\s*]/g, ']')           // Trailing commas before ]
+            .replace(/'/g, '"')               // Single quotes to double
+            .replace(/\n/g, '\\n')            // Escape newlines in strings
+            .replace(/\t/g, '\\t')            // Escape tabs
+            .replace(/\r/g, '\\r')            // Escape carriage returns
+            .replace(/\\(?!["\\/bfnrtu])/g, '\\\\'); // Escape unescaped backslashes
+
+        const result = JSON.parse(fixedContent);
+        if (validateParsedResult(result)) return result;
     } catch (e) {
         devLog('JSON fix attempt failed');
+    }
+
+    // Strategy 6: Try to extract files array directly and construct response
+    try {
+        const filesArrayMatch = content.match(/\[\s*\{[\s\S]*?"path"\s*:/);
+        if (filesArrayMatch) {
+            const arrayStart = content.indexOf('[', filesArrayMatch.index);
+            let depth = 0;
+            let arrayEnd = -1;
+            for (let i = arrayStart; i < content.length; i++) {
+                if (content[i] === '[') depth++;
+                else if (content[i] === ']') {
+                    depth--;
+                    if (depth === 0) {
+                        arrayEnd = i;
+                        break;
+                    }
+                }
+            }
+            if (arrayEnd !== -1) {
+                const filesArray = JSON.parse(content.slice(arrayStart, arrayEnd + 1));
+                if (Array.isArray(filesArray) && filesArray.length > 0) {
+                    devLog('Extracted files array directly');
+                    return {
+                        files: filesArray,
+                        description: 'Generated content'
+                    };
+                }
+            }
+        }
+    } catch (e) {
+        devLog('Direct files array extraction failed');
     }
 
     devError('All JSON parsing strategies failed');
     devError('Response preview:', content.substring(0, 500));
     throw new Error('Failed to parse AI response as JSON');
+}
+
+/**
+ * Validate that parsed result has required structure
+ */
+function validateParsedResult(result) {
+    if (!result || typeof result !== 'object') return false;
+    if (!result.files || !Array.isArray(result.files)) return false;
+    if (result.files.length === 0) return false;
+
+    // Check that at least one file has path and content
+    const hasValidFile = result.files.some(f => f.path && typeof f.content === 'string');
+    return hasValidFile;
 }
 
 /**

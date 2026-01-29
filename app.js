@@ -6,6 +6,7 @@ import { initProjects, loadProject, getCurrentFiles, createProject, createVersio
 import { generateProject, checkCredits, fetchModelsWithCredits, refactorLargeFile, analyzeProjectHealth, formatTokenCount } from './ai.js';
 import { thinking, isDev, devLog } from './thinking.js';
 import { getRefactoringSuggestions, getStatusColor } from './tokens.js';
+import { runAgent, isAgentModeEnabled, setAgentMode, supportsToolCalling } from './agent.js';
 
 // --- Initialization ---
 async function init() {
@@ -25,6 +26,7 @@ async function init() {
     initProjects();
     setupEventListeners();
     setupModelSelector();
+    setupAgentModeToggle();
 
     // Dev mode indicator
     if (isDev) {
@@ -192,7 +194,12 @@ async function handleSend(isRetry = false) {
 
     if (state.isGenerating) return;
 
-    setLoading(true, state.projectId ? "Refining project..." : "Architecting new project...");
+    const useAgent = isAgentModeEnabled();
+    const loadingText = state.projectId
+        ? (useAgent ? "Agent refining project..." : "Refining project...")
+        : (useAgent ? "Agent creating project..." : "Architecting new project...");
+
+    setLoading(true, loadingText);
 
     try {
         // Create Project if needed
@@ -206,25 +213,72 @@ async function handleSend(isRetry = false) {
         }
 
         const currentFiles = getCurrentFiles();
-        const result = await generateProject(prompt, currentFiles);
 
-        if (result) {
-            state.pendingPrompt = null;
-            await createVersion(state.projectId, {
-                prompt: prompt,
-                files: result.files,
-                description: result.description || "Updated project",
-            });
-
-            input.value = '';
-            input.style.height = 'auto';
-            showToast(`Version generated!`);
+        // Choose between Agent Mode and Normal Mode
+        let result;
+        if (useAgent) {
+            devLog('Using AGENT MODE');
+            result = await runAgent(prompt, currentFiles);
+        } else {
+            devLog('Using NORMAL MODE');
+            result = await generateProject(prompt, currentFiles);
         }
+
+        // Validate result
+        if (!result) {
+            throw new Error('No response received from AI');
+        }
+
+        if (!result.files || !Array.isArray(result.files)) {
+            throw new Error('Invalid response: missing files');
+        }
+
+        if (result.files.length === 0) {
+            throw new Error('AI returned no files - try rephrasing your request');
+        }
+
+        // Validate each file has required properties
+        for (const file of result.files) {
+            if (!file.path) {
+                devLog('Warning: file missing path, skipping', file);
+                continue;
+            }
+            if (typeof file.content !== 'string') {
+                devLog('Warning: file missing content', file.path);
+                file.content = '';
+            }
+        }
+
+        // Filter out invalid files
+        result.files = result.files.filter(f => f.path && typeof f.content === 'string');
+
+        if (result.files.length === 0) {
+            throw new Error('No valid files in AI response');
+        }
+
+        state.pendingPrompt = null;
+
+        // Create version (and auto-commit via projects.js) only after agent completes
+        devLog('Creating version with', result.files.length, 'files');
+        await createVersion(state.projectId, {
+            prompt: prompt,
+            files: result.files,
+            description: result.description || "Updated project",
+        });
+
+        input.value = '';
+        input.style.height = 'auto';
+
+        const modeLabel = useAgent ? `Agent completed in ${result.iterations || 1} iteration(s)` : 'Version generated';
+        showToast(modeLabel);
+
     } catch (error) {
-        console.error(error);
+        console.error('Generation error:', error);
+        devLog('Full error:', error);
         showToast("Generation failed: " + (error.message || "Please try again."));
     } finally {
         setLoading(false);
+        thinking.hide(); // Ensure thinking UI is hidden
     }
 }
 
@@ -234,7 +288,25 @@ function injectModelSelector() {
     dropdown.id = 'model-dropdown';
     dropdown.className = 'fixed z-50 hidden';
     dropdown.innerHTML = `
-        <div class="bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-xl shadow-2xl w-72 max-h-80 overflow-hidden flex flex-col">
+        <div class="bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-xl shadow-2xl w-72 max-h-96 overflow-hidden flex flex-col">
+            <!-- Mode Toggle at Top -->
+            <div class="p-2 border-b border-gray-700/50">
+                <div class="flex items-center justify-between mb-2 px-1">
+                    <span class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Generation Mode</span>
+                </div>
+                <div id="mode-toggle-container" class="flex rounded-lg bg-gray-800/50 p-0.5 border border-gray-700/50">
+                    <button type="button" id="btn-simple-mode" class="flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-bolt text-[10px]"></i>
+                        <span>Simple</span>
+                    </button>
+                    <button type="button" id="btn-agent-mode-toggle" class="flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-robot text-[10px]"></i>
+                        <span>Agent</span>
+                    </button>
+                </div>
+                <p id="mode-description" class="text-[10px] text-gray-500 mt-1.5 px-1 text-center"></p>
+            </div>
+            <!-- Model Selection -->
             <div class="p-2 border-b border-gray-700/50">
                 <div class="flex items-center justify-between mb-2 px-2">
                     <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">Select Model</span>
@@ -257,6 +329,59 @@ function setupModelSelector() {
 
     let models = [];
     let isOpen = false;
+    let modeHandlersSetup = false;
+
+    // Update mode toggle UI in dropdown
+    const updateModeToggleUI = () => {
+        const simpleBtn = document.getElementById('btn-simple-mode');
+        const agentBtn = document.getElementById('btn-agent-mode-toggle');
+        const description = document.getElementById('mode-description');
+        const isAgent = state.settings.agentMode;
+
+        if (simpleBtn && agentBtn && description) {
+            if (isAgent) {
+                agentBtn.className = 'flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2 bg-purple-600 text-white shadow-lg';
+                simpleBtn.className = 'flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2 text-gray-400 hover:text-white hover:bg-gray-700/50';
+                description.textContent = 'Multi-pass tool-calling agent (like Claude Code)';
+            } else {
+                simpleBtn.className = 'flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2 bg-blue-600 text-white shadow-lg';
+                agentBtn.className = 'flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2 text-gray-400 hover:text-white hover:bg-gray-700/50';
+                description.textContent = 'Single prompt → instant output (fast)';
+            }
+        }
+        // Also update model display
+        updateModelDisplay();
+    };
+
+    // Setup mode toggle handlers once
+    const setupModeHandlers = () => {
+        if (modeHandlersSetup) return;
+        modeHandlersSetup = true;
+
+        const simpleBtn = document.getElementById('btn-simple-mode');
+        const agentBtn = document.getElementById('btn-agent-mode-toggle');
+
+        simpleBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (state.settings.agentMode) {
+                setAgentMode(false);
+                updateModeToggleUI();
+                showToast('Simple Mode: Single prompt → instant output');
+            }
+        });
+
+        agentBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (!state.settings.agentMode) {
+                if (!supportsToolCalling(state.settings.openRouterModel)) {
+                    showToast('Current model may not support Agent Mode - try Claude or GPT-4');
+                }
+                setAgentMode(true);
+                updateModeToggleUI();
+                showToast('Agent Mode: Multi-pass with tools');
+            }
+        });
+    };
 
     btn?.addEventListener('click', async (e) => {
         e.stopPropagation();
@@ -274,6 +399,10 @@ function setupModelSelector() {
             dropdown.style.left = `${Math.max(10, rect.left - 100)}px`;
             dropdown.style.bottom = `${window.innerHeight - rect.top + 8}px`;
             dropdown.classList.remove('hidden');
+
+            // Update mode toggle state and setup handlers
+            updateModeToggleUI();
+            setupModeHandlers();
 
             // Fetch models and credits
             const list = document.getElementById('model-list');
@@ -384,9 +513,10 @@ function updateModelDisplay() {
     if (!display) return;
 
     const modelId = state.settings.openRouterModel;
-    // Show short name
+    // Show short name with mode indicator
     const shortName = modelId.split('/').pop().split('-').slice(0, 2).join(' ');
-    display.textContent = shortName.charAt(0).toUpperCase() + shortName.slice(1);
+    const modeIndicator = state.settings.agentMode ? '🤖' : '⚡';
+    display.textContent = `${modeIndicator} ${shortName.charAt(0).toUpperCase() + shortName.slice(1)}`;
 }
 
 // --- Health Indicator ---
@@ -571,6 +701,55 @@ async function handleRefactorFile(filePath) {
     } finally {
         setLoading(false);
     }
+}
+
+// --- Agent Mode Toggle ---
+function setupAgentModeToggle() {
+    // Load saved setting
+    const saved = JSON.parse(localStorage.getItem('app_settings') || '{}');
+    if (typeof saved.agentMode === 'boolean') {
+        state.settings.agentMode = saved.agentMode;
+    }
+
+    // Update model display to reflect current mode
+    updateModelDisplay();
+}
+
+function toggleAgentMode() {
+    const newState = !state.settings.agentMode;
+
+    // Check if model supports tool calling for agent mode
+    if (newState && !supportsToolCalling(state.settings.openRouterModel)) {
+        showToast('Current model may not support Agent Mode - try Claude or GPT-4');
+    }
+
+    setAgentMode(newState);
+    updateAgentModeUI();
+    updateModelDisplay();
+    showToast(newState ? 'Agent Mode: Multi-pass with tools' : 'Simple Mode: Single output');
+}
+
+function updateAgentModeUI() {
+    // Update the mode toggle in the dropdown if visible
+    const simpleBtn = document.getElementById('btn-simple-mode');
+    const agentBtn = document.getElementById('btn-agent-mode-toggle');
+    const description = document.getElementById('mode-description');
+    const isAgent = state.settings.agentMode;
+
+    if (simpleBtn && agentBtn && description) {
+        if (isAgent) {
+            agentBtn.className = 'flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2 bg-purple-600 text-white shadow-lg';
+            simpleBtn.className = 'flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2 text-gray-400 hover:text-white hover:bg-gray-700/50';
+            description.textContent = 'Multi-pass tool-calling agent (like Claude Code)';
+        } else {
+            simpleBtn.className = 'flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2 bg-blue-600 text-white shadow-lg';
+            agentBtn.className = 'flex-1 py-2 px-3 rounded-md text-xs font-medium transition-all flex items-center justify-center gap-2 text-gray-400 hover:text-white hover:bg-gray-700/50';
+            description.textContent = 'Single prompt → instant output (fast)';
+        }
+    }
+
+    // Update model display
+    updateModelDisplay();
 }
 
 // Boot

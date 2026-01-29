@@ -36,12 +36,107 @@ export const state = {
         hfTtsModel: "facebook/mms-tts-eng",
         githubAutoCreate: false,
         githubAutoSync: false,
+        agentMode: false, // Toggle between Agent Mode (multi-pass) and Normal Mode (single output)
     },
 
     // Temp state for PIN flows
     pinFlow: null,
     pendingPrompt: null,
 };
+
+/**
+ * In-Memory Project Cache
+ * Caches project data to avoid repeated fetches from Supabase/GitHub
+ * TTL: 5 minutes for project list, versions cached until project changes
+ */
+class ProjectCache {
+    constructor() {
+        this.projectsCache = null;
+        this.projectsCacheTime = 0;
+        this.versionsCache = new Map(); // projectId -> { versions, timestamp }
+        this.filesCache = new Map(); // projectId -> { files, timestamp }
+        this.PROJECTS_TTL = 5 * 60 * 1000; // 5 minutes
+        this.VERSIONS_TTL = 10 * 60 * 1000; // 10 minutes
+    }
+
+    // Project list caching
+    setProjects(projects) {
+        this.projectsCache = projects;
+        this.projectsCacheTime = Date.now();
+    }
+
+    getProjects() {
+        if (this.projectsCache && (Date.now() - this.projectsCacheTime) < this.PROJECTS_TTL) {
+            return this.projectsCache;
+        }
+        return null;
+    }
+
+    invalidateProjects() {
+        this.projectsCache = null;
+        this.projectsCacheTime = 0;
+    }
+
+    // Version caching per project
+    setVersions(projectId, versions) {
+        this.versionsCache.set(projectId, {
+            versions: JSON.parse(JSON.stringify(versions)), // Deep clone
+            timestamp: Date.now()
+        });
+    }
+
+    getVersions(projectId) {
+        const cached = this.versionsCache.get(projectId);
+        if (cached && (Date.now() - cached.timestamp) < this.VERSIONS_TTL) {
+            return JSON.parse(JSON.stringify(cached.versions)); // Return clone
+        }
+        return null;
+    }
+
+    invalidateVersions(projectId) {
+        this.versionsCache.delete(projectId);
+    }
+
+    // Current files caching (for quick access)
+    setCurrentFiles(projectId, files) {
+        this.filesCache.set(projectId, {
+            files: JSON.parse(JSON.stringify(files)),
+            timestamp: Date.now()
+        });
+    }
+
+    getCurrentFiles(projectId) {
+        const cached = this.filesCache.get(projectId);
+        if (cached) {
+            return JSON.parse(JSON.stringify(cached.files));
+        }
+        return null;
+    }
+
+    // Add new version to cache without full invalidation
+    addVersionToCache(projectId, version) {
+        const cached = this.versionsCache.get(projectId);
+        if (cached) {
+            cached.versions.push(JSON.parse(JSON.stringify(version)));
+            cached.timestamp = Date.now();
+        }
+        // Also update files cache
+        if (version.files) {
+            this.setCurrentFiles(projectId, version.files);
+        }
+    }
+
+    // Clear all caches (on logout, etc.)
+    clearAll() {
+        this.projectsCache = null;
+        this.projectsCacheTime = 0;
+        this.versionsCache.clear();
+        this.filesCache.clear();
+    }
+}
+
+// Export singleton cache instance
+export const projectCache = new ProjectCache();
 
 // Event Bus for decoupled communication
 export const events = new EventTarget();

@@ -152,10 +152,59 @@ input:disabled ~ div {
 .status-parsing { color: #34d399; }
 .status-error { color: #f87171; }
 .status-complete { color: #4ade80; }
+.status-iteration { color: #c4b5fd; font-weight: 600; }
+.status-tool { color: #a78bfa; }
+.status-warning { color: #fbbf24; }
+
+/* Agent Mode Styles */
+#btn-agent-mode.agent-active {
+    background: rgba(147, 51, 234, 0.3);
+    border-color: rgba(147, 51, 234, 0.5);
+    color: #c4b5fd;
+}
+
+#btn-agent-mode.agent-active i {
+    animation: robotPulse 2s ease-in-out infinite;
+}
+
+@keyframes robotPulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* Agent iteration indicator */
+.agent-iteration {
+    color: #c4b5fd;
+    font-weight: 600;
+}
+
+/* Tool call styling in thinking log */
+.tool-call {
+    color: #a78bfa;
+    font-family: 'Fira Code', monospace;
+}
+
+.tool-result {
+    color: #34d399;
+    font-size: 10px;
+    margin-left: 12px;
+    opacity: 0.8;
+}
 
 /* Mobile-Specific Tweaks */
 @media (max-width: 640px) {
     #bottom-bar-container {
         padding-bottom: env(safe-area-inset-bottom, 20px);
+    }
+
+    /* Hide agent label on very small screens */
+    #agent-mode-label {
+        display: none;
+    }
+
+    #btn-agent-mode {
+        width: 32px;
+        padding: 0;
+        justify-content: center;
     }
 }
