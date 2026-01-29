@@ -4,6 +4,7 @@ import { showToast, setLoading, setupVoiceInput } from './utils.js';
 import { initSettings, startPinFlow } from './settings.js';
 import { initProjects, loadProject, getCurrentFiles, createProject, createVersion } from './projects.js';
 import { generateProject, checkCredits, fetchModelsWithCredits } from './ai.js';
+import { thinking, isDev, devLog } from './thinking.js';
 
 // --- Initialization ---
 async function init() {
@@ -16,10 +17,19 @@ async function init() {
     // Inject model selector dropdown
     injectModelSelector();
 
+    // Initialize thinking UI
+    thinking.init();
+
     initSettings();
     initProjects();
     setupEventListeners();
     setupModelSelector();
+
+    // Dev mode indicator
+    if (isDev) {
+        devLog('Running in DEV mode');
+        document.title = 'SimpleSim [DEV]';
+    }
 
     // Resume previous project if ID exists AND user is logged in
     if (state.projectId && state.user) {
