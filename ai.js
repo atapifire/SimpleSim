@@ -278,16 +278,26 @@ function mergeFiles(existingFiles, newFiles) {
 }
 
 /**
- * Make streaming API call to OpenRouter
+ * Retry configuration for transient errors
  */
-async function generateWithOpenRouter(messages) {
+const RETRY_CONFIG = {
+    maxRetries: 2,
+    retryDelay: 1000, // 1 second
+    retryableStatuses: [404, 429, 500, 502, 503, 504] // Provider errors, rate limits, server errors
+};
+
+/**
+ * Make streaming API call to OpenRouter with retry logic
+ */
+async function generateWithOpenRouter(messages, retryCount = 0) {
     const key = security.getKey();
     if (!key) throw new Error("OpenRouter Key Locked or Missing");
 
     thinking.show();
-    thinking.setStatus('thinking', `Connecting to ${state.settings.openRouterModel}...`);
+    const retryLabel = retryCount > 0 ? ` (retry ${retryCount}/${RETRY_CONFIG.maxRetries})` : '';
+    thinking.setStatus('thinking', `Connecting to ${state.settings.openRouterModel}...${retryLabel}`);
 
-    devLog('Starting generation with model:', state.settings.openRouterModel);
+    devLog('Starting generation with model:', state.settings.openRouterModel, retryCount > 0 ? `(retry ${retryCount})` : '');
     devLog('Messages:', messages.length, 'total');
 
     const controller = new AbortController();
@@ -332,8 +342,23 @@ async function generateWithOpenRouter(messages) {
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));
             devError('API Error:', response.status, err);
-            thinking.setStatus('error', `API Error: ${err.error?.message || response.statusText}`);
-            throw new Error(`OpenRouter Error: ${err.error?.message || response.statusText}`);
+
+            // Check if this is a retryable error
+            if (RETRY_CONFIG.retryableStatuses.includes(response.status) && retryCount < RETRY_CONFIG.maxRetries) {
+                const errorType = response.status === 404 ? 'Provider unavailable' :
+                                  response.status === 429 ? 'Rate limited' : 'Server error';
+                thinking.setStatus('thinking', `${errorType}, retrying in ${RETRY_CONFIG.retryDelay/1000}s...`);
+                thinking.log('warning', `${errorType} (${response.status}), retry ${retryCount + 1}/${RETRY_CONFIG.maxRetries}`);
+                devLog(`Retrying after ${response.status} error...`);
+
+                await new Promise(r => setTimeout(r, RETRY_CONFIG.retryDelay));
+                return generateWithOpenRouter(messages, retryCount + 1);
+            }
+
+            // Non-retryable or max retries exceeded
+            const errorMsg = err.error?.message || response.statusText || `HTTP ${response.status}`;
+            thinking.setStatus('error', `API Error: ${errorMsg}`);
+            throw new Error(`OpenRouter Error: ${errorMsg}`);
         }
 
         thinking.setStatus('generating', 'Receiving response...');

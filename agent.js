@@ -435,9 +435,18 @@ export async function runAgent(prompt, currentFiles) {
 }
 
 /**
- * Call OpenRouter API with tool support
+ * Retry configuration for transient errors
  */
-async function callOpenRouterWithTools(messages, key) {
+const RETRY_CONFIG = {
+    maxRetries: 2,
+    retryDelay: 1000,
+    retryableStatuses: [404, 429, 500, 502, 503, 504]
+};
+
+/**
+ * Call OpenRouter API with tool support and retry logic
+ */
+async function callOpenRouterWithTools(messages, key, retryCount = 0) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => {
         controller.abort();
@@ -445,7 +454,8 @@ async function callOpenRouterWithTools(messages, key) {
     }, API_TIMEOUT);
 
     try {
-        thinking.log('tool', `Calling ${state.settings.openRouterModel}...`);
+        const retryLabel = retryCount > 0 ? ` (retry ${retryCount})` : '';
+        thinking.log('tool', `Calling ${state.settings.openRouterModel}...${retryLabel}`);
 
         const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
             method: "POST",
@@ -468,8 +478,20 @@ async function callOpenRouterWithTools(messages, key) {
 
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));
-            const errorMsg = err.error?.message || response.statusText;
+            const errorMsg = err.error?.message || response.statusText || `HTTP ${response.status}`;
             devError('Agent API error:', response.status, errorMsg);
+
+            // Check if retryable
+            if (RETRY_CONFIG.retryableStatuses.includes(response.status) && retryCount < RETRY_CONFIG.maxRetries) {
+                const errorType = response.status === 404 ? 'Provider unavailable' :
+                                  response.status === 429 ? 'Rate limited' : 'Server error';
+                thinking.log('warning', `${errorType}, retrying...`);
+                devLog(`Retrying agent call after ${response.status} error...`);
+
+                await new Promise(r => setTimeout(r, RETRY_CONFIG.retryDelay));
+                return callOpenRouterWithTools(messages, key, retryCount + 1);
+            }
+
             throw new Error(`API Error: ${errorMsg}`);
         }
 
