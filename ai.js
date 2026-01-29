@@ -812,6 +812,3 @@ export function checkModelToolSupport(modelId) {
 
 // Re-export for use in other modules
 export { analyzeProjectHealth, formatTokenCount } from './tokens.js';
-
-// Export tool support check for agent.js
-export { checkModelToolSupport };
