@@ -579,6 +579,13 @@ function validateParsedResult(result) {
 
 /**
  * Check OpenRouter API key credits
+ *
+ * OpenRouter API returns:
+ * - limit: null = unlimited (paid with no cap)
+ * - limit: 0 = no credits / free tier
+ * - limit: >0 = credit limit in cents
+ * - usage: current usage in cents
+ * - is_free_tier: boolean (if provided by API)
  */
 export async function checkCredits() {
     const key = security.getKey();
@@ -592,13 +599,30 @@ export async function checkCredits() {
         if (!response.ok) return null;
 
         const data = await response.json();
-        devLog('Credits info:', data.data);
+        devLog('Credits API response:', JSON.stringify(data.data, null, 2));
+
+        const limit = data.data?.limit;
+        const usage = data.data?.usage || 0;
+        const rateLimitCredits = data.data?.rate_limit?.credits;
+
+        // Determine if free tier:
+        // 1. API explicitly says is_free_tier
+        // 2. limit is exactly 0 (not null)
+        // 3. rate_limit.credits is 0 or very low
+        // 4. No limit set (null) AND no usage AND no rate limit credits
+        const isFreeTier =
+            data.data?.is_free_tier === true ||
+            limit === 0 ||
+            (limit === null && usage === 0 && (!rateLimitCredits || rateLimitCredits === 0));
+
+        devLog('Credit detection:', { limit, usage, rateLimitCredits, isFreeTier });
 
         return {
-            credits: data.data?.limit || 0,
-            usage: data.data?.usage || 0,
-            remaining: (data.data?.limit || 0) - (data.data?.usage || 0),
-            isFreeTier: (data.data?.limit || 0) === 0
+            credits: limit ?? 0,
+            usage: usage,
+            remaining: limit !== null ? Math.max(0, limit - usage) : Infinity,
+            isFreeTier: isFreeTier,
+            isUnlimited: limit === null && !isFreeTier
         };
     } catch (e) {
         devError('Failed to check credits:', e);
@@ -621,18 +645,26 @@ export async function fetchModelsWithCredits() {
             checkCredits()
         ]);
 
-        if (!modelsRes.ok) return [];
+        if (!modelsRes.ok) {
+            devError('Models API error:', modelsRes.status, modelsRes.statusText);
+            return [];
+        }
 
         const modelsData = await modelsRes.json();
         let models = modelsData.data || [];
+        devLog('Total models from API:', models.length);
 
         if (creditsInfo?.isFreeTier) {
+            const beforeFilter = models.length;
             models = models.filter(m =>
                 m.pricing?.prompt === "0" ||
                 m.pricing?.prompt === 0 ||
+                String(m.pricing?.prompt) === "0" ||
                 m.id.includes(':free')
             );
-            devLog('Free tier detected, showing', models.length, 'free models');
+            devLog(`Free tier: filtered ${beforeFilter} → ${models.length} free models`);
+        } else {
+            devLog('Paid tier or unlimited: showing all', models.length, 'models');
         }
 
         return models.sort((a, b) => a.name.localeCompare(b.name));

@@ -422,6 +422,9 @@ function setupModelSelector() {
                     if (credits.isFreeTier) {
                         badge.textContent = 'Free Tier';
                         badge.className = 'text-[10px] px-2 py-0.5 rounded bg-yellow-900/30 text-yellow-400 border border-yellow-900/30';
+                    } else if (credits.isUnlimited) {
+                        badge.textContent = 'Unlimited';
+                        badge.className = 'text-[10px] px-2 py-0.5 rounded bg-purple-900/30 text-purple-400 border border-purple-900/30';
                     } else {
                         const remaining = (credits.remaining / 100).toFixed(2);
                         badge.textContent = `$${remaining} credits`;
