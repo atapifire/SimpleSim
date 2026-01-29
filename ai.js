@@ -667,57 +667,32 @@ export async function checkCredits() {
 }
 
 /**
+ * Cache for model tool support (populated from API response)
+ * Key: model ID, Value: 'full' | 'partial' | 'none'
+ */
+const modelToolSupportCache = new Map();
+
+/**
  * Detect if a model supports tool calling from API response
- * OpenRouter returns supported_parameters array with "tools" for tool-capable models
+ * OpenRouter returns supported_parameters array - ONLY "tools" indicates tool support
+ * "tool_choice" alone does NOT mean tool support
  */
 function detectToolSupport(model) {
-    // Check supported_parameters from API
     const supportedParams = model.supported_parameters || [];
-    if (supportedParams.includes('tools') || supportedParams.includes('tool_choice')) {
-        return 'full';
+
+    // ONLY check for "tools" in supported_parameters - this is the definitive check
+    // "tool_choice" alone doesn't mean tool support (some models have it but can't use tools)
+    let support = 'none';
+    if (supportedParams.includes('tools')) {
+        support = 'full';
     }
 
-    // Check architecture hints
-    const arch = model.architecture || {};
-    if (arch.tool_calling === true) {
-        return 'full';
+    // Cache the result for runtime checks
+    if (model.id) {
+        modelToolSupportCache.set(model.id, support);
     }
 
-    // Fallback: check model ID patterns for known tool-capable models
-    const id = (model.id || '').toLowerCase();
-
-    // Models with FULL tool support
-    const fullToolSupport = [
-        'claude-3', 'claude-sonnet', 'claude-opus', 'claude-haiku',
-        'gpt-4', 'gpt-3.5-turbo',
-        'gemini-1.5', 'gemini-2', 'gemini-pro',
-        'mistral-large', 'mistral-medium',
-        'command-r',
-        'deepseek-chat', 'deepseek-coder'
-    ];
-
-    if (fullToolSupport.some(p => id.includes(p))) {
-        return 'full';
-    }
-
-    // Models with PARTIAL/limited tool support
-    const partialToolSupport = [
-        'mixtral',
-        'mistral-small',
-        'codestral'
-    ];
-
-    if (partialToolSupport.some(p => id.includes(p))) {
-        return 'partial';
-    }
-
-    // Free models generally don't support tools
-    if (id.includes(':free')) {
-        return 'none';
-    }
-
-    // Unknown - assume none for safety
-    return 'none';
+    return support;
 }
 
 /**
@@ -753,12 +728,14 @@ export async function fetchModelsWithCredits() {
         }));
 
         // Log tool support stats
+        const toolModels = models.filter(m => m.toolSupport === 'full');
         const toolStats = {
-            full: models.filter(m => m.toolSupport === 'full').length,
-            partial: models.filter(m => m.toolSupport === 'partial').length,
-            none: models.filter(m => m.toolSupport === 'none').length
+            full: toolModels.length,
+            none: models.filter(m => m.toolSupport === 'none').length,
+            cached: modelToolSupportCache.size
         };
         devLog('Tool support stats:', toolStats);
+        devLog('Models with tool support:', toolModels.map(m => m.id).slice(0, 10), '...');
 
         if (creditsInfo?.isFreeTier) {
             const beforeFilter = models.length;
@@ -778,35 +755,28 @@ export async function fetchModelsWithCredits() {
 /**
  * Check if a model ID supports tool calling
  * Used by agent.js to validate model before running
+ *
+ * Priority:
+ * 1. Check cache (populated from API response)
+ * 2. Free models (:free) → always 'none'
+ * 3. Unknown → assume 'none' for safety
  */
 export function checkModelToolSupport(modelId) {
-    const id = (modelId || '').toLowerCase();
+    if (!modelId) return 'none';
 
-    // Free models don't support tools
-    if (id.includes(':free')) {
+    // Check cache first (populated when models are fetched)
+    if (modelToolSupportCache.has(modelId)) {
+        return modelToolSupportCache.get(modelId);
+    }
+
+    // Free models never support tools
+    if (modelId.toLowerCase().includes(':free')) {
         return 'none';
     }
 
-    // Full support
-    const fullSupport = [
-        'claude-3', 'claude-sonnet', 'claude-opus', 'claude-haiku',
-        'gpt-4', 'gpt-3.5-turbo',
-        'gemini-1.5', 'gemini-2', 'gemini-pro',
-        'mistral-large', 'mistral-medium',
-        'command-r',
-        'deepseek-chat', 'deepseek-coder'
-    ];
-
-    if (fullSupport.some(p => id.includes(p))) {
-        return 'full';
-    }
-
-    // Partial support
-    const partialSupport = ['mixtral', 'mistral-small', 'codestral'];
-    if (partialSupport.some(p => id.includes(p))) {
-        return 'partial';
-    }
-
+    // Unknown model - assume no support for safety
+    // User should select a model from the dropdown to get accurate detection
+    devLog(`Model ${modelId} not in cache - assuming no tool support`);
     return 'none';
 }
 
