@@ -3,8 +3,9 @@ import { security } from './security.js';
 import { showToast, setLoading, setupVoiceInput } from './utils.js';
 import { initSettings, startPinFlow } from './settings.js';
 import { initProjects, loadProject, getCurrentFiles, createProject, createVersion } from './projects.js';
-import { generateProject, checkCredits, fetchModelsWithCredits } from './ai.js';
+import { generateProject, checkCredits, fetchModelsWithCredits, refactorLargeFile, analyzeProjectHealth, formatTokenCount } from './ai.js';
 import { thinking, isDev, devLog } from './thinking.js';
+import { getRefactoringSuggestions, getStatusColor } from './tokens.js';
 
 // --- Initialization ---
 async function init() {
@@ -31,6 +32,9 @@ async function init() {
         document.title = 'SimpleSim [DEV]';
     }
 
+    // Setup health indicator
+    setupHealthIndicator();
+
     // Resume previous project if ID exists AND user is logged in
     if (state.projectId && state.user) {
         await loadProject(state.projectId);
@@ -40,6 +44,9 @@ async function init() {
 
     // Update model display
     updateModelDisplay();
+
+    // Listen for version changes to update health
+    events.addEventListener('version-changed', updateHealthIndicator);
 }
 
 // Inject login/logout button into the UI
@@ -380,6 +387,190 @@ function updateModelDisplay() {
     // Show short name
     const shortName = modelId.split('/').pop().split('-').slice(0, 2).join(' ');
     display.textContent = shortName.charAt(0).toUpperCase() + shortName.slice(1);
+}
+
+// --- Health Indicator ---
+let healthDropdownOpen = false;
+
+function setupHealthIndicator() {
+    const btn = document.getElementById('btn-health');
+    if (!btn) return;
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        healthDropdownOpen = !healthDropdownOpen;
+
+        if (healthDropdownOpen) {
+            showHealthDropdown(btn);
+        } else {
+            hideHealthDropdown();
+        }
+    });
+
+    // Close on outside click
+    document.addEventListener('click', (e) => {
+        if (healthDropdownOpen && !e.target.closest('#health-dropdown') && !e.target.closest('#btn-health')) {
+            healthDropdownOpen = false;
+            hideHealthDropdown();
+        }
+    });
+}
+
+function updateHealthIndicator() {
+    const btn = document.getElementById('btn-health');
+    const label = document.getElementById('health-label');
+    if (!btn || !label) return;
+
+    const files = getCurrentFiles();
+    if (!files || files.length === 0) {
+        btn.classList.add('hidden');
+        btn.classList.remove('flex');
+        return;
+    }
+
+    const health = analyzeProjectHealth(files);
+
+    if (health.status === 'healthy') {
+        btn.classList.add('hidden');
+        btn.classList.remove('flex');
+        return;
+    }
+
+    // Show the indicator
+    btn.classList.remove('hidden');
+    btn.classList.add('flex');
+
+    // Update styling based on status
+    const colors = getStatusColor(health.status);
+    btn.className = `absolute right-28 bottom-2 h-8 px-2 rounded-lg text-xs border flex items-center gap-1.5 transition-colors cursor-pointer hover:opacity-80 ${colors}`;
+
+    // Show total tokens or warning count
+    if (health.warnings.length > 0) {
+        const largestFile = health.warnings.reduce((max, f) => f.tokens > max.tokens ? f : max);
+        label.textContent = `${formatTokenCount(largestFile.tokens)}+`;
+        btn.title = `${health.warnings.length} file(s) need attention - click to manage`;
+    }
+}
+
+function showHealthDropdown(anchorBtn) {
+    // Remove existing dropdown
+    hideHealthDropdown();
+
+    const files = getCurrentFiles();
+    const health = analyzeProjectHealth(files);
+    const suggestions = getRefactoringSuggestions(files);
+
+    const dropdown = document.createElement('div');
+    dropdown.id = 'health-dropdown';
+    dropdown.className = 'fixed z-50 bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-xl shadow-2xl w-80 max-h-96 overflow-hidden flex flex-col';
+
+    // Position above button
+    const rect = anchorBtn.getBoundingClientRect();
+    dropdown.style.left = `${Math.max(10, rect.left - 150)}px`;
+    dropdown.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+
+    dropdown.innerHTML = `
+        <div class="p-3 border-b border-gray-700/50">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-heart-pulse ${health.status === 'critical' ? 'text-red-400' : 'text-yellow-400'}"></i>
+                    <span class="text-sm font-semibold text-white">Project Health</span>
+                </div>
+                <span class="text-xs px-2 py-0.5 rounded ${getStatusColor(health.status)}">${health.status.toUpperCase()}</span>
+            </div>
+            <p class="text-xs text-gray-400 mt-1">
+                ${formatTokenCount(health.totalTokens)} total tokens across ${files.length} files
+            </p>
+        </div>
+        <div class="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
+            ${health.warnings.length === 0 ? `
+                <div class="text-center text-gray-500 text-xs py-4">
+                    <i class="fa-solid fa-check-circle text-green-400 text-lg mb-2"></i>
+                    <p>All files are within healthy limits</p>
+                </div>
+            ` : health.warnings.map(file => `
+                <div class="bg-gray-800/50 rounded-lg p-2 border ${file.status === 'critical' ? 'border-red-900/50' : 'border-yellow-900/50'}">
+                    <div class="flex items-center justify-between mb-1">
+                        <span class="text-xs font-medium text-white truncate">${file.path}</span>
+                        <span class="text-[10px] px-1.5 py-0.5 rounded ${getStatusColor(file.status)}">${formatTokenCount(file.tokens)}</span>
+                    </div>
+                    <p class="text-[10px] text-gray-400 mb-2">${file.lines} lines - consider splitting for better maintainability</p>
+                    <button class="refactor-btn w-full text-[10px] py-1.5 px-2 rounded bg-blue-600 hover:bg-blue-500 text-white transition-colors flex items-center justify-center gap-1" data-file="${file.path}">
+                        <i class="fa-solid fa-code-branch"></i>
+                        Refactor into smaller files
+                    </button>
+                </div>
+            `).join('')}
+        </div>
+        <div class="p-2 border-t border-gray-700/50 bg-gray-800/30">
+            <p class="text-[10px] text-gray-500 text-center">
+                Files over 5k tokens may slow down AI responses
+            </p>
+        </div>
+    `;
+
+    document.body.appendChild(dropdown);
+
+    // Add refactor button handlers
+    dropdown.querySelectorAll('.refactor-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const filePath = btn.dataset.file;
+            await handleRefactorFile(filePath);
+            hideHealthDropdown();
+            healthDropdownOpen = false;
+        });
+    });
+}
+
+function hideHealthDropdown() {
+    const existing = document.getElementById('health-dropdown');
+    if (existing) existing.remove();
+}
+
+async function handleRefactorFile(filePath) {
+    const files = getCurrentFiles();
+    if (!files) return;
+
+    setLoading(true, `Refactoring ${filePath}...`);
+
+    try {
+        const result = await refactorLargeFile(files, filePath);
+
+        if (result && result.files) {
+            // Apply the refactoring as a new version
+            const mergedFiles = [...files];
+
+            for (const newFile of result.files) {
+                const action = newFile.action || 'modify';
+                const existingIndex = mergedFiles.findIndex(f => f.path === newFile.path);
+
+                if (action === 'delete') {
+                    if (existingIndex !== -1) {
+                        mergedFiles.splice(existingIndex, 1);
+                    }
+                } else if (action === 'add' || existingIndex === -1) {
+                    mergedFiles.push({ path: newFile.path, content: newFile.content });
+                } else {
+                    mergedFiles[existingIndex] = { path: newFile.path, content: newFile.content };
+                }
+            }
+
+            await createVersion(state.projectId, {
+                prompt: `Refactored ${filePath} into smaller files`,
+                files: mergedFiles,
+                description: result.description || `Refactored ${filePath}`,
+            });
+
+            showToast(`Refactored ${filePath} successfully`);
+            updateHealthIndicator();
+        }
+    } catch (error) {
+        devLog('Refactoring failed:', error);
+        showToast(`Refactoring failed: ${error.message}`);
+    } finally {
+        setLoading(false);
+    }
 }
 
 // Boot

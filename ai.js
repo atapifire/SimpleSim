@@ -1,21 +1,31 @@
 import { state } from './state.js';
 import { security } from './security.js';
 import { thinking, devLog, devError } from './thinking.js';
+import { analyzeProjectHealth, generateCodeMap, estimateTokens, formatTokenCount, buildRefactoringPrompt } from './tokens.js';
 
 // Timeout for API requests (3 minutes for streaming)
 const API_TIMEOUT = 180000;
+
+// Token thresholds for edit strategies
+const SMALL_PROJECT_TOKENS = 8000;   // Full content for small projects
+const MEDIUM_PROJECT_TOKENS = 20000; // Summarized for medium
+// Above MEDIUM = code map only
 
 /**
  * Generate or update a project based on user prompt
  */
 export async function generateProject(prompt, currentFiles) {
     const isRevision = currentFiles && Array.isArray(currentFiles) && currentFiles.length > 0;
+    const health = isRevision ? analyzeProjectHealth(currentFiles) : null;
 
     devLog('Generation mode:', isRevision ? 'REVISION' : 'NEW PROJECT');
-    devLog('Current files:', currentFiles?.map(f => f.path) || 'none');
+    if (health) {
+        devLog('Project health:', health.status, `(${formatTokenCount(health.totalTokens)} tokens)`);
+    }
 
+    // Choose the optimal prompt strategy based on project size
     const systemPrompt = isRevision
-        ? buildRevisionPrompt(currentFiles)
+        ? buildRevisionPrompt(currentFiles, health)
         : buildNewProjectPrompt();
 
     let messages = [
@@ -23,9 +33,9 @@ export async function generateProject(prompt, currentFiles) {
         { role: "user", content: prompt }
     ];
 
-    // For revisions, include current files context efficiently
+    // For revisions, include context based on project size
     if (isRevision) {
-        const fileContext = buildFileContext(currentFiles);
+        const fileContext = buildOptimalContext(currentFiles, health);
         messages.splice(1, 0, {
             role: "user",
             content: fileContext
@@ -41,6 +51,43 @@ export async function generateProject(prompt, currentFiles) {
     }
 
     return result;
+}
+
+/**
+ * Request AI to refactor a large file into smaller ones
+ */
+export async function refactorLargeFile(files, targetFile) {
+    const prompt = buildRefactoringPrompt(files, targetFile);
+    if (!prompt) {
+        throw new Error(`File ${targetFile} not found`);
+    }
+
+    const messages = [
+        {
+            role: "system",
+            content: `You are an expert at code organization and refactoring.
+Your task is to split a large file into smaller, well-organized modules.
+
+OUTPUT FORMAT - Return ONLY valid JSON:
+{
+  "files": [
+    { "path": "newfile.js", "content": "...", "action": "add" },
+    { "path": "oldfile.js", "content": "", "action": "delete" }
+  ],
+  "description": "Split into X smaller modules"
+}
+
+RULES:
+1. Create 2-4 new focused files
+2. Each file should have a single responsibility
+3. Preserve all functionality
+4. Use clear, descriptive file names
+5. Update imports/exports as needed`
+        },
+        { role: "user", content: prompt }
+    ];
+
+    return await generateWithOpenRouter(messages);
 }
 
 /**
@@ -66,99 +113,145 @@ REQUIREMENTS:
 - Use vanilla JavaScript
 - Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs
 - Make it mobile-responsive
-- Include basic interactivity where appropriate`;
+- Include basic interactivity where appropriate
+- Keep files under 200 lines each when possible`;
 }
 
 /**
- * Build system prompt for revisions - optimized for partial updates
+ * Build system prompt for revisions - uses efficient edit format
  */
-function buildRevisionPrompt(currentFiles) {
-    const fileList = currentFiles.map(f => `- ${f.path} (${f.content.length} chars)`).join('\n');
+function buildRevisionPrompt(currentFiles, health) {
+    const fileList = currentFiles.map(f => {
+        const tokens = estimateTokens(f.content);
+        const status = tokens >= 5000 ? ' ⚠️ LARGE' : '';
+        return `- ${f.path} (${formatTokenCount(tokens)} tokens)${status}`;
+    }).join('\n');
 
+    // Use search/replace format for efficiency (inspired by Aider)
     return `You are an expert Frontend Developer. Modify an existing website based on the user's request.
 
-CURRENT PROJECT FILES:
+PROJECT FILES:
 ${fileList}
+Total: ${formatTokenCount(health.totalTokens)} tokens
 
 OUTPUT FORMAT - Return ONLY valid JSON:
 {
   "files": [
-    { "path": "filename.ext", "content": "full file content", "action": "modify" }
+    {
+      "path": "filename.ext",
+      "content": "complete new file content",
+      "action": "modify"
+    }
   ],
   "description": "Brief description of changes"
 }
 
-IMPORTANT RULES:
-1. Only include files that need to be CHANGED or ADDED
-2. Do NOT include unchanged files
-3. For each file, specify action: "modify", "add", or "delete"
-4. For "delete" action, content can be empty
-5. Return the COMPLETE new content for modified files (not diffs)
-6. Preserve existing functionality unless asked to change it
-7. Keep the same file structure when possible
+EFFICIENCY RULES:
+1. Only return files that CHANGE - never include unchanged files
+2. Actions: "modify" (update), "add" (new file), "delete" (remove)
+3. Return COMPLETE file content for modified files
+4. For small changes, still return the full file content
+5. Preserve existing functionality unless asked to change
 
-EXAMPLE - If user asks to "change the header color to blue":
+FILE SIZE GUIDANCE:
+- If a file is marked ⚠️ LARGE, consider splitting it when making changes
+- Keep individual files under 200 lines when practical
+- Split by responsibility: layout, components, utilities, etc.
+
+EXAMPLE for "change button color to blue":
 {
   "files": [
-    { "path": "styles.css", "content": "/* updated CSS with blue header */...", "action": "modify" }
+    { "path": "styles.css", "content": "/* full updated CSS */", "action": "modify" }
   ],
-  "description": "Changed header color to blue"
+  "description": "Changed button color to blue"
 }`;
 }
 
 /**
- * Build efficient file context for the model
+ * Build optimal context based on project size
  */
-function buildFileContext(files) {
-    // For small projects, include full content
-    const totalSize = files.reduce((sum, f) => sum + f.content.length, 0);
+function buildOptimalContext(files, health) {
+    const totalTokens = health.totalTokens;
 
-    if (totalSize < 20000) {
-        // Include full files for small projects
-        const fileContents = files.map(f =>
-            `=== ${f.path} ===\n${f.content}`
-        ).join('\n\n');
-
-        return `CURRENT PROJECT FILES:\n\n${fileContents}\n\nModify these files based on my request below.`;
+    // Small projects: include everything
+    if (totalTokens < SMALL_PROJECT_TOKENS) {
+        devLog('Using FULL context strategy');
+        return buildFullContext(files);
     }
 
-    // For larger projects, include structure + key file excerpts
-    devLog('Large project detected, using summarized context');
+    // Medium projects: summarized with key excerpts
+    if (totalTokens < MEDIUM_PROJECT_TOKENS) {
+        devLog('Using SUMMARIZED context strategy');
+        return buildSummarizedContext(files);
+    }
 
-    let context = 'CURRENT PROJECT STRUCTURE:\n\n';
+    // Large projects: code map only
+    devLog('Using CODE MAP context strategy');
+    return buildCodeMapContext(files);
+}
+
+/**
+ * Full context - include all file contents
+ */
+function buildFullContext(files) {
+    const fileContents = files.map(f =>
+        `=== ${f.path} ===\n${f.content}`
+    ).join('\n\n');
+
+    return `CURRENT PROJECT FILES:\n\n${fileContents}\n\nApply the requested changes to these files.`;
+}
+
+/**
+ * Summarized context - truncate large files
+ */
+function buildSummarizedContext(files) {
+    let context = 'CURRENT PROJECT (summarized for large files):\n\n';
 
     for (const file of files) {
-        context += `=== ${file.path} (${file.content.length} chars) ===\n`;
+        const tokens = estimateTokens(file.content);
+        context += `=== ${file.path} (${formatTokenCount(tokens)} tokens) ===\n`;
 
-        if (file.path === 'index.html') {
-            // Include HTML structure
-            context += file.content.substring(0, 2000);
-            if (file.content.length > 2000) context += '\n... (truncated)';
-        } else if (file.path === 'styles.css') {
-            // Include first part of CSS
-            context += file.content.substring(0, 1500);
-            if (file.content.length > 1500) context += '\n... (truncated)';
-        } else if (file.path === 'script.js') {
-            // Include JS structure
-            context += file.content.substring(0, 1500);
-            if (file.content.length > 1500) context += '\n... (truncated)';
+        if (tokens < 2000) {
+            // Include full content for smaller files
+            context += file.content;
         } else {
-            // Other files - just show beginning
-            context += file.content.substring(0, 500);
-            if (file.content.length > 500) context += '\n... (truncated)';
+            // Truncate larger files with smart excerpts
+            const lines = file.content.split('\n');
+            const headLines = lines.slice(0, 50).join('\n');
+            const tailLines = lines.slice(-20).join('\n');
+
+            context += headLines;
+            context += `\n\n... [${lines.length - 70} lines omitted] ...\n\n`;
+            context += tailLines;
         }
         context += '\n\n';
     }
 
-    return context + 'Modify these files based on my request. Return COMPLETE file contents for any file you change.';
+    return context + 'Apply the requested changes. Return COMPLETE file content for any file you modify.';
+}
+
+/**
+ * Code map context - structure only, minimal content
+ */
+function buildCodeMapContext(files) {
+    const codeMap = generateCodeMap(files);
+
+    // Still include the most relevant file fully if it's small
+    const smallFiles = files.filter(f => estimateTokens(f.content) < 1500);
+    let relevantContent = '';
+
+    if (smallFiles.length > 0) {
+        const mainFile = smallFiles.find(f => f.path === 'index.html') || smallFiles[0];
+        relevantContent = `\n\nMAIN FILE CONTENT:\n=== ${mainFile.path} ===\n${mainFile.content}`;
+    }
+
+    return `${codeMap}${relevantContent}\n\nThis is a LARGE project. I've provided the structure and key file.
+When you make changes, return COMPLETE file content for modified files.
+If you need to see a specific file's full content, ask me to provide it.`;
 }
 
 /**
  * Merge AI response files with existing files
- * - Modified files replace existing
- * - Added files are appended
- * - Deleted files are removed
- * - Unchanged files are preserved
  */
 function mergeFiles(existingFiles, newFiles) {
     const result = [...existingFiles];
@@ -173,11 +266,9 @@ function mergeFiles(existingFiles, newFiles) {
                 devLog(`Deleted: ${newFile.path}`);
             }
         } else if (action === 'add' || existingIndex === -1) {
-            // New file
             result.push({ path: newFile.path, content: newFile.content });
             devLog(`Added: ${newFile.path}`);
         } else {
-            // Modify existing file
             result[existingIndex] = { path: newFile.path, content: newFile.content };
             devLog(`Modified: ${newFile.path}`);
         }
@@ -260,11 +351,8 @@ async function generateWithOpenRouter(messages) {
                         if (content) {
                             fullContent += content;
                             chunkCount++;
-
-                            // Stream code to thinking UI
                             thinking.streamCode(content);
 
-                            // Log progress periodically
                             if (chunkCount % 50 === 0) {
                                 thinking.log('stream', `${fullContent.length} chars received...`);
                             }
@@ -284,26 +372,16 @@ async function generateWithOpenRouter(messages) {
             throw new Error('Empty response from AI');
         }
 
-        // Parse JSON response with multiple fallback strategies
         const parsed = parseAIResponse(fullContent);
 
-        // Validate response structure
         if (!parsed.files || !Array.isArray(parsed.files)) {
             thinking.setStatus('error', 'Invalid response structure');
             throw new Error('Response missing files array');
         }
 
-        // Ensure index.html exists (for new projects)
-        const hasIndex = parsed.files.some(f => f.path === 'index.html');
-        if (!hasIndex && parsed.files.some(f => f.action !== 'delete')) {
-            // Check if this is a revision that doesn't touch index.html
-            devLog('No index.html in response - this may be a partial update');
-        }
-
         thinking.setStatus('complete', `Generated ${parsed.files.length} file(s)`);
         devLog('Generation complete:', parsed.files.map(f => `${f.path} (${f.action || 'modify'})`));
 
-        // Hide thinking after a short delay
         setTimeout(() => thinking.hide(), 2000);
 
         return parsed;
@@ -356,7 +434,6 @@ function parseAIResponse(content) {
 
     // Strategy 4: Try to fix common JSON issues
     try {
-        // Remove potential trailing commas and fix quotes
         let fixed = content
             .replace(/,\s*}/g, '}')
             .replace(/,\s*]/g, ']')
@@ -420,7 +497,6 @@ export async function fetchModelsWithCredits() {
         const modelsData = await modelsRes.json();
         let models = modelsData.data || [];
 
-        // If free tier (no credits), filter to free models only
         if (creditsInfo?.isFreeTier) {
             models = models.filter(m =>
                 m.pricing?.prompt === "0" ||
@@ -436,3 +512,6 @@ export async function fetchModelsWithCredits() {
         return [];
     }
 }
+
+// Re-export for use in other modules
+export { analyzeProjectHealth, formatTokenCount } from './tokens.js';

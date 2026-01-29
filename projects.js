@@ -178,6 +178,9 @@ export async function createVersion(projectId, { prompt, files, description, mod
     renderProject(files);
     updateHistoryUI();
 
+    // Notify UI to update health indicator
+    events.dispatchEvent(new CustomEvent('version-changed'));
+
     // Auto-sync to GitHub if enabled and repo is linked
     devLog('Checking GitHub auto-sync...');
     try {
@@ -260,6 +263,7 @@ export async function loadProject(id) {
     if (state.versions.length > 0) {
         state.currentVersionIndex = state.versions.length - 1;
         renderProject(getCurrentFiles());
+        events.dispatchEvent(new CustomEvent('version-changed'));
     } else {
         document.getElementById('welcome-screen')?.classList.remove('hidden');
     }
