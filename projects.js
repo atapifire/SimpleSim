@@ -1,7 +1,8 @@
 import { state, supabase, events } from './state.js';
 import { renderProject } from './renderer.js';
 import { showToast } from './utils.js';
-import { autoCreateRepoIfEnabled, autoCommitIfLinked, convertFilesForGitHub } from './github.js';
+import { autoCreateRepoIfEnabled, autoCommitIfLinked } from './github.js';
+import { devLog, devError } from './thinking.js';
 
 const PROJECT_MENU_HTML = `
 <div id="project-menu" class="absolute bottom-full left-0 mb-3 ml-2 w-64 bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-xl shadow-2xl transform origin-bottom-left transition-all duration-200 opacity-0 pointer-events-none translate-y-2 z-50 flex flex-col">
@@ -131,6 +132,9 @@ export async function createProject(name) {
 export async function createVersion(projectId, { prompt, files, description, modelUsed }) {
     if (!state.user) throw new Error('Not authenticated');
 
+    devLog('Creating version for project:', projectId);
+    devLog('Files to save:', files.map(f => f.path));
+
     const { data, error } = await supabase
         .from('versions')
         .insert({
@@ -144,15 +148,21 @@ export async function createVersion(projectId, { prompt, files, description, mod
         .single();
 
     if (error) {
-        console.error('Error creating version:', error);
+        devError('Error creating version:', error);
         throw error;
     }
 
+    devLog('Version created:', data.id);
+
     // Update project's current_files
-    await supabase
+    const { error: updateError } = await supabase
         .from('projects')
         .update({ current_files: files })
         .eq('id', projectId);
+
+    if (updateError) {
+        devError('Error updating project files:', updateError);
+    }
 
     // Add to local versions and re-render
     state.versions.push({
@@ -164,14 +174,19 @@ export async function createVersion(projectId, { prompt, files, description, mod
     });
 
     state.currentVersionIndex = state.versions.length - 1;
+    devLog('Rendering project with', files.length, 'files');
     renderProject(files);
     updateHistoryUI();
 
     // Auto-sync to GitHub if enabled and repo is linked
+    devLog('Checking GitHub auto-sync...');
     try {
-        await autoCommitIfLinked(projectId, files, prompt);
+        const commitResult = await autoCommitIfLinked(projectId, files, prompt);
+        if (commitResult) {
+            devLog('GitHub commit successful:', commitResult.sha);
+        }
     } catch (e) {
-        console.error('Auto-sync skipped:', e);
+        devError('Auto-sync failed:', e);
     }
 
     return data;
