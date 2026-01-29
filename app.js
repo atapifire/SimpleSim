@@ -513,13 +513,22 @@ function renderModelList(models) {
 
 function updateModelDisplay() {
     const display = document.getElementById('model-display');
+    const modeIcon = document.getElementById('mode-icon');
     if (!display) return;
 
     const modelId = state.settings.openRouterModel;
-    // Show short name with mode indicator
+    // Show short name (no emoji, icon handles mode)
     const shortName = modelId.split('/').pop().split('-').slice(0, 2).join(' ');
-    const modeIndicator = state.settings.agentMode ? '🤖' : '⚡';
-    display.textContent = `${modeIndicator} ${shortName.charAt(0).toUpperCase() + shortName.slice(1)}`;
+    display.textContent = shortName.charAt(0).toUpperCase() + shortName.slice(1);
+
+    // Update mode icon
+    if (modeIcon) {
+        if (state.settings.agentMode) {
+            modeIcon.className = 'fa-solid fa-robot text-[10px] text-purple-400';
+        } else {
+            modeIcon.className = 'fa-solid fa-bolt text-[10px] text-blue-400';
+        }
+    }
 }
 
 // --- Health Indicator ---

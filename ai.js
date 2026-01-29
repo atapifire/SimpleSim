@@ -392,11 +392,47 @@ async function generateWithOpenRouter(messages) {
         }
 
         devLog('Streaming complete, total content:', fullContent.length, 'chars');
+
+        // If streaming returned empty, try non-streaming fallback
+        if (!fullContent || fullContent.length === 0) {
+            devLog('Streaming returned empty, trying non-streaming fallback...');
+            thinking.setStatus('generating', 'Retrying without streaming...');
+
+            const fallbackResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${key}`,
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": window.location.origin,
+                    "X-Title": "SimpleSim"
+                },
+                body: JSON.stringify({
+                    model: state.settings.openRouterModel,
+                    messages: messages,
+                    stream: false
+                })
+            });
+
+            if (!fallbackResponse.ok) {
+                const err = await fallbackResponse.json().catch(() => ({}));
+                thinking.setStatus('error', `Fallback failed: ${err.error?.message || fallbackResponse.statusText}`);
+                throw new Error(`OpenRouter Error: ${err.error?.message || fallbackResponse.statusText}`);
+            }
+
+            const fallbackData = await fallbackResponse.json();
+            fullContent = fallbackData.choices?.[0]?.message?.content || '';
+            devLog('Fallback response:', fullContent.length, 'chars');
+
+            if (fullContent) {
+                thinking.streamCode(fullContent);
+            }
+        }
+
         thinking.setStatus('parsing', 'Parsing response...');
 
         if (!fullContent) {
             thinking.setStatus('error', 'Empty response from AI');
-            throw new Error('Empty response from AI');
+            throw new Error('Empty response from AI - model returned no content');
         }
 
         const parsed = parseAIResponse(fullContent);

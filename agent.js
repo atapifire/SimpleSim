@@ -247,6 +247,17 @@ IMPORTANT:
 export async function runAgent(prompt, currentFiles) {
     const isNewProject = !currentFiles || currentFiles.length === 0;
 
+    // Check if model supports tool calling
+    const modelId = state.settings.openRouterModel;
+    if (!supportsToolCalling(modelId)) {
+        const errorMsg = `Agent Mode requires a model with tool support.\n\n"${modelId}" doesn't support tools.\n\nSwitch to Simple Mode, or select a model like Claude, GPT-4, or Gemini Pro.`;
+        thinking.show();
+        thinking.setStatus('error', 'Model does not support Agent Mode');
+        thinking.log('error', `${modelId} doesn't support tool calling`);
+        setTimeout(() => thinking.hide(), 3000);
+        throw new Error(errorMsg);
+    }
+
     // Initialize working state
     workingFiles = isNewProject ? [] : JSON.parse(JSON.stringify(currentFiles));
     iterationCount = 0;
@@ -257,6 +268,7 @@ export async function runAgent(prompt, currentFiles) {
     thinking.show();
     thinking.setStatus('thinking', 'Agent starting...');
     devLog('Agent mode:', isNewProject ? 'NEW PROJECT' : 'MODIFY EXISTING');
+    devLog('Model supports tools:', modelId);
 
     // Build initial messages
     const messages = [
@@ -472,23 +484,51 @@ async function callOpenRouterWithTools(messages, key) {
 
 /**
  * Check if the current model supports tool calling
+ * Free tier models generally don't support tools
  */
 export function supportsToolCalling(modelId) {
-    // Most modern models support tool calling
-    // This is a best-effort check based on known model patterns
+    const lowerModelId = modelId.toLowerCase();
+
+    // Free models DON'T support tool calling
+    if (lowerModelId.includes(':free')) {
+        return false;
+    }
+
+    // Models known to support tool calling
     const supportedPatterns = [
         'gpt-4',
         'gpt-3.5-turbo',
-        'claude',
-        'gemini',
-        'mistral',
-        'mixtral',
-        'llama-3',
+        'claude-3',
+        'claude-2',
+        'gemini-pro',
+        'gemini-1.5',
+        'mistral-large',
+        'mistral-medium',
+        'mixtral-8x22b',
         'command-r',
-        'deepseek'
+        'deepseek-chat',
+        'deepseek-coder'
     ];
 
-    const lowerModelId = modelId.toLowerCase();
+    // Models known to NOT support tool calling
+    const unsupportedPatterns = [
+        'llama',
+        'qwen',
+        'yi-',
+        'phi-',
+        'gemma',
+        'openchat',
+        'nous-',
+        'mythomist',
+        'toppy'
+    ];
+
+    // Check unsupported first
+    if (unsupportedPatterns.some(pattern => lowerModelId.includes(pattern))) {
+        return false;
+    }
+
+    // Check supported
     return supportedPatterns.some(pattern => lowerModelId.includes(pattern));
 }
 
