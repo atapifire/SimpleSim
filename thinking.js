@@ -1,6 +1,6 @@
 /**
  * Thinking UI Module
- * Shows AI progress with streaming text and expandable log
+ * Shows AI progress with streaming code and expandable log
  */
 
 // Dev mode detection
@@ -18,6 +18,7 @@ class ThinkingUI {
         this.isExpanded = false;
         this.logs = [];
         this.currentStatus = '';
+        this.streamBuffer = '';
     }
 
     init() {
@@ -44,7 +45,9 @@ class ThinkingUI {
     show() {
         this.container?.classList.remove('hidden');
         this.logs = [];
+        this.streamBuffer = '';
         if (this.logEl) this.logEl.innerHTML = '';
+        if (this.textEl) this.textEl.textContent = '';
     }
 
     hide() {
@@ -63,15 +66,6 @@ class ThinkingUI {
     setStatus(status, message) {
         this.currentStatus = status;
 
-        // Update scrolling text
-        if (this.textEl) {
-            this.textEl.textContent = message;
-            // Reset animation
-            this.textEl.style.animation = 'none';
-            this.textEl.offsetHeight; // Trigger reflow
-            this.textEl.style.animation = '';
-        }
-
         // Update indicator color
         const indicator = document.getElementById('thinking-indicator');
         if (indicator) {
@@ -86,7 +80,35 @@ class ThinkingUI {
             }
         }
 
+        // Update status label
+        const label = document.querySelector('#thinking-bar .text-gray-500');
+        if (label) {
+            label.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+        }
+
         this.log(status, message);
+    }
+
+    // Stream code chunks - shows in the scrolling text area
+    streamCode(chunk) {
+        this.streamBuffer += chunk;
+
+        // Keep only the last ~200 chars for display, scrolling effect
+        const displayText = this.streamBuffer.slice(-200).replace(/\n/g, ' ').replace(/\s+/g, ' ');
+
+        if (this.textEl) {
+            this.textEl.textContent = displayText;
+            // Reset animation to create continuous scroll effect
+            this.textEl.style.animation = 'none';
+            this.textEl.offsetHeight; // Trigger reflow
+            this.textEl.style.animation = 'scrollLeft 15s linear infinite';
+        }
+    }
+
+    // Clear stream buffer (call when starting new generation)
+    clearStream() {
+        this.streamBuffer = '';
+        if (this.textEl) this.textEl.textContent = '';
     }
 
     log(type, message) {
@@ -120,13 +142,6 @@ class ThinkingUI {
         }
     }
 
-    streamText(chunk) {
-        // Append chunk to scrolling text
-        if (this.textEl) {
-            this.textEl.textContent += chunk;
-        }
-    }
-
     getConsoleStyle(type) {
         switch (type) {
             case 'thinking': return 'color: #60a5fa; font-weight: bold';
@@ -134,6 +149,7 @@ class ThinkingUI {
             case 'parsing': return 'color: #34d399; font-weight: bold';
             case 'error': return 'color: #f87171; font-weight: bold';
             case 'complete': return 'color: #4ade80; font-weight: bold';
+            case 'stream': return 'color: #9ca3af';
             default: return 'color: #9ca3af; font-weight: bold';
         }
     }

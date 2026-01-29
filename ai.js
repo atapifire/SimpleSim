@@ -91,6 +91,7 @@ async function generateWithOpenRouter(messages) {
         }
 
         thinking.setStatus('generating', 'Receiving response...');
+        thinking.clearStream();
 
         // Handle streaming response
         const reader = response.body.getReader();
@@ -117,11 +118,12 @@ async function generateWithOpenRouter(messages) {
                             fullContent += content;
                             chunkCount++;
 
-                            // Update thinking UI with progress
-                            if (chunkCount % 10 === 0) {
-                                const preview = fullContent.slice(-100).replace(/\n/g, ' ');
-                                thinking.setStatus('generating', `Generating... ${fullContent.length} chars`);
-                                thinking.log('stream', preview);
+                            // Stream code to thinking UI (shows scrolling code)
+                            thinking.streamCode(content);
+
+                            // Log progress periodically
+                            if (chunkCount % 50 === 0) {
+                                thinking.log('stream', `${fullContent.length} chars received...`);
                             }
                         }
                     } catch (e) {
