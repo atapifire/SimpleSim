@@ -16,6 +16,11 @@ import { devLog, devError } from './thinking.js';
 const SUPABASE_URL = 'https://ouvrecllkqtwbtrwyhgw.supabase.co';
 const STORE_KEY_URL = `${SUPABASE_URL}/functions/v1/store-api-key`;
 const UNLOCK_SESSION_URL = `${SUPABASE_URL}/functions/v1/unlock-session`;
+const JOB_SCHEDULER_URL = `${SUPABASE_URL}/functions/v1/job-scheduler`;
+
+// Scheduler polling interval (fallback for unreliable GitHub Actions cron)
+let schedulerPollInterval = null;
+const SCHEDULER_POLL_MS = 10000; // Poll every 10 seconds when jobs are pending
 
 /**
  * Get access token from state, with no network calls (to avoid hanging)
@@ -526,6 +531,75 @@ async function generateDeviceFingerprint() {
 }
 
 // ============================================
+// Job Scheduler Triggering (Fallback for GitHub Actions)
+// ============================================
+
+/**
+ * Trigger the job scheduler Edge Function
+ * This is a fallback since GitHub Actions cron is unreliable
+ * Exported for manual triggering if needed
+ */
+export async function triggerJobScheduler() {
+    try {
+        devLog('Triggering job scheduler (client fallback)...');
+        const response = await authenticatedFetch(JOB_SCHEDULER_URL, {
+            method: 'GET'
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            devLog('Scheduler triggered:', data.processed, 'jobs processed');
+            return data;
+        } else {
+            // Non-critical error - scheduler might be busy or no jobs pending
+            devLog('Scheduler response:', response.status);
+        }
+    } catch (e) {
+        // Non-critical - just log and continue
+        devLog('Scheduler trigger failed (non-critical):', e.message);
+    }
+    return null;
+}
+
+/**
+ * Start polling the scheduler while jobs are pending
+ */
+function startSchedulerPolling() {
+    if (schedulerPollInterval) {
+        devLog('Scheduler polling already running');
+        return;
+    }
+
+    devLog('Starting scheduler polling (every', SCHEDULER_POLL_MS / 1000, 'seconds)');
+
+    // Trigger immediately
+    triggerJobScheduler();
+
+    // Then poll periodically
+    schedulerPollInterval = setInterval(async () => {
+        // Check if we still have pending jobs
+        const pendingJobs = await getPendingJobs();
+        if (pendingJobs.length === 0) {
+            stopSchedulerPolling();
+            return;
+        }
+
+        await triggerJobScheduler();
+    }, SCHEDULER_POLL_MS);
+}
+
+/**
+ * Stop polling the scheduler
+ */
+function stopSchedulerPolling() {
+    if (schedulerPollInterval) {
+        devLog('Stopping scheduler polling');
+        clearInterval(schedulerPollInterval);
+        schedulerPollInterval = null;
+    }
+}
+
+// ============================================
 // Job Submission and Management
 // ============================================
 
@@ -577,6 +651,9 @@ export async function submitJob(projectId, prompt, files, options = {}) {
     state.currentJob = job;
     events.dispatchEvent(new CustomEvent('job-submitted', { detail: job }));
 
+    // Start scheduler polling as fallback (GitHub Actions cron is unreliable)
+    startSchedulerPolling();
+
     return job;
 }
 
@@ -625,11 +702,13 @@ export function subscribeToJob(jobId, callbacks = {}) {
                         iterations: job.current_iteration
                     });
                     channel.unsubscribe();
+                    stopSchedulerPolling(); // Stop polling since job completed
                 }
 
                 if (job.status === 'failed') {
                     onError(new Error(job.error_message || 'Job failed'));
                     channel.unsubscribe();
+                    stopSchedulerPolling(); // Stop polling since job failed
                 }
             }
         )
@@ -658,6 +737,12 @@ export async function cancelJob(jobId) {
 
     devLog('Job cancelled:', jobId);
     events.dispatchEvent(new CustomEvent('job-cancelled', { detail: { jobId } }));
+
+    // Check if there are remaining pending jobs
+    const remaining = await getPendingJobs();
+    if (remaining.length === 0) {
+        stopSchedulerPolling();
+    }
 
     return true;
 }
@@ -791,9 +876,17 @@ export async function initJobQueue() {
     events.addEventListener('auth-changed', async () => {
         if (state.user) {
             await checkSessionStatus();
+
+            // Check if there are pending jobs and start polling if so
+            const pendingJobs = await getPendingJobs();
+            if (pendingJobs.length > 0) {
+                devLog('Found', pendingJobs.length, 'pending jobs on auth change');
+                startSchedulerPolling();
+            }
         } else {
             state.sessionUnlocked = false;
             state.sessionExpiresAt = null;
+            stopSchedulerPolling();
         }
     });
 
@@ -812,6 +905,15 @@ export async function initJobQueue() {
             }
         }
     }, 30000); // Check every 30 seconds
+
+    // Check for pending jobs on init
+    if (state.user) {
+        const pendingJobs = await getPendingJobs();
+        if (pendingJobs.length > 0) {
+            devLog('Found', pendingJobs.length, 'pending jobs on init');
+            startSchedulerPolling();
+        }
+    }
 
     devLog('Job queue initialized');
 }
