@@ -1,0 +1,50 @@
+name: Deploy Edge Functions
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'supabase/functions/**'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Deploy job-scheduler
+        run: supabase functions deploy job-scheduler --project-ref ouvrecllkqtwbtrwyhgw
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Deploy process-job
+        run: supabase functions deploy process-job --project-ref ouvrecllkqtwbtrwyhgw
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Deploy store-api-key
+        run: supabase functions deploy store-api-key --project-ref ouvrecllkqtwbtrwyhgw
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Deploy unlock-session
+        run: supabase functions deploy unlock-session --project-ref ouvrecllkqtwbtrwyhgw
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Deployment Summary
+        run: |
+          echo "✅ Edge Functions deployed successfully!"
+          echo "Functions deployed:"
+          echo "  - job-scheduler"
+          echo "  - process-job"
+          echo "  - store-api-key"
+          echo "  - unlock-session"
