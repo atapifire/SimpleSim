@@ -253,10 +253,20 @@ export async function runAgent(prompt, currentFiles) {
     const toolSupport = getToolSupportLevel(modelId);
 
     if (toolSupport === 'none') {
-        const errorMsg = `Agent Mode requires a model with tool support.\n\n"${modelId}" doesn't support tools.\n\nSwitch to Simple Mode, or select a model like Claude, GPT-4, or Gemini Pro.`;
+        // Check if it's a free model - these often claim tool support but don't work
+        const isFreeModel = modelId.includes(':free');
+        const shortName = modelId.split('/').pop();
+
+        let errorMsg;
+        if (isFreeModel) {
+            errorMsg = `Agent Mode doesn't work reliably with free models.\n\n"${shortName}" is a free tier model that may not support tool calling.\n\nSwitch to Simple Mode (works great with all models), or upgrade to a paid model like Claude 3.5 Sonnet.`;
+        } else {
+            errorMsg = `Agent Mode requires a model with tool support.\n\n"${shortName}" doesn't support tools.\n\nSwitch to Simple Mode, or select a model like Claude, GPT-4, or Gemini Pro.`;
+        }
+
         thinking.show();
         thinking.setStatus('error', 'Model does not support Agent Mode');
-        thinking.log('error', `${modelId} doesn't support tool calling`);
+        thinking.log('error', `${shortName} doesn't support tool calling`);
         setTimeout(() => thinking.hide(), 3000);
         throw new Error(errorMsg);
     }
@@ -368,6 +378,19 @@ export async function runAgent(prompt, currentFiles) {
                     content: response.content
                 });
 
+                // Check if this is the first iteration with no progress - model may not support tools
+                if (iterationCount === 1 && workingFiles.length === 0 && isNewProject) {
+                    devLog('First iteration: model responded with text but no tool calls');
+                    thinking.log('warning', 'Model not using tools - may not support Agent Mode');
+
+                    // Give the model one more chance with explicit tool instruction
+                    messages.push({
+                        role: "user",
+                        content: "You MUST use the tools to complete this task. Start by calling write_file() to create index.html. Do not respond with code in text - use the write_file tool."
+                    });
+                    continue;
+                }
+
                 // Check if the model thinks it's done without calling finish
                 if (response.content.toLowerCase().includes('complete') ||
                     response.content.toLowerCase().includes('finished') ||
@@ -380,8 +403,22 @@ export async function runAgent(prompt, currentFiles) {
                     });
                 }
             } else {
-                // Empty response, break
+                // Empty response
                 devError('Empty response from agent');
+
+                // If first iteration with no files, this model likely doesn't work with Agent Mode
+                if (iterationCount === 1 && workingFiles.length === 0) {
+                    thinking.setStatus('error', 'Model returned empty response');
+                    throw new Error(
+                        `Model "${state.settings.openRouterModel}" returned an empty response in Agent Mode.\n\n` +
+                        `This model may not support tool/function calling.\n\n` +
+                        `Try:\n` +
+                        `• Switch to Simple Mode (works with all models)\n` +
+                        `• Use a model with tool support (Claude, GPT-4, Gemini Pro)`
+                    );
+                }
+
+                // Later iterations - might be a transient issue, break and use what we have
                 break;
             }
 
@@ -400,8 +437,28 @@ export async function runAgent(prompt, currentFiles) {
     // Validate we have files to return
     if (!workingFiles || workingFiles.length === 0) {
         thinking.setStatus('error', 'Agent produced no files');
-        devError('Agent completed with no files');
-        throw new Error('Agent completed but produced no files - try again');
+        devError('Agent completed with no files after', iterationCount, 'iterations');
+
+        // Provide helpful error based on context
+        const modelName = state.settings.openRouterModel.split('/').pop();
+        const isFreeModel = state.settings.openRouterModel.includes(':free');
+
+        let errorMsg = `Agent completed but produced no files.\n\n`;
+
+        if (isFreeModel) {
+            errorMsg += `Free models often don't support tool calling properly.\n\n`;
+        } else {
+            errorMsg += `The model "${modelName}" may not support Agent Mode well.\n\n`;
+        }
+
+        errorMsg += `Solutions:\n`;
+        errorMsg += `• Switch to Simple Mode (fast, works with all models)\n`;
+        errorMsg += `• Try a model with full tool support:\n`;
+        errorMsg += `  - Claude 3.5 Sonnet\n`;
+        errorMsg += `  - GPT-4 / GPT-4o\n`;
+        errorMsg += `  - Gemini Pro`;
+
+        throw new Error(errorMsg);
     }
 
     // Ensure all files have valid content

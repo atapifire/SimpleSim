@@ -155,8 +155,15 @@ export async function createVersion(projectId, { prompt, files, description, mod
         throw new Error('No files to save');
     }
 
+    // Verify project ID matches state
+    if (state.projectId !== projectId) {
+        devLog('Warning: projectId mismatch, syncing state');
+        state.projectId = projectId;
+    }
+
     devLog('Creating version for project:', projectId);
     devLog('Files to save:', files.map(f => f.path));
+    devLog('Current state.versions length:', state.versions.length);
 
     const { data, error } = await supabase
         .from('versions')
@@ -204,22 +211,33 @@ export async function createVersion(projectId, { prompt, files, description, mod
     projectCache.addVersionToCache(projectId, newVersion);
 
     devLog('Rendering project with', files.length, 'files');
+
+    // Ensure welcome screen is hidden and render
+    document.getElementById('welcome-screen')?.classList.add('hidden');
+    document.getElementById('project-loader')?.classList.add('hidden');
+
     renderProject(files);
     updateHistoryUI();
 
     // Notify UI to update health indicator
     events.dispatchEvent(new CustomEvent('version-changed'));
 
-    // Auto-sync to GitHub if enabled and repo is linked
-    devLog('Checking GitHub auto-sync...');
-    try {
-        const commitResult = await autoCommitIfLinked(projectId, files, prompt);
-        if (commitResult) {
-            devLog('GitHub commit successful:', commitResult.sha);
+    devLog('Version created and rendered successfully');
+
+    // Auto-sync to GitHub if enabled and repo is linked (non-blocking)
+    // Run in background so it doesn't block UI
+    // Note: autoCommitIfLinked handles its own toast notifications
+    (async () => {
+        devLog('Checking GitHub auto-sync...');
+        try {
+            const commitResult = await autoCommitIfLinked(projectId, files, prompt);
+            if (commitResult) {
+                devLog('GitHub commit successful:', commitResult.sha);
+            }
+        } catch (e) {
+            devError('Auto-sync failed (unexpected):', e);
         }
-    } catch (e) {
-        devError('Auto-sync failed:', e);
-    }
+    })();
 
     return data;
 }
