@@ -8,7 +8,8 @@ import {
     hasServerKey,
     unlockSession,
     checkSessionStatus,
-    isPasskeySupported
+    isPasskeySupported,
+    getApiKey
 } from './job-queue.js';
 import { devLog, devError } from './thinking.js';
 
@@ -377,6 +378,7 @@ export function updateUI() {
             els.keyStatusIndicator.className = `text-xs px-2 py-0.5 rounded border flex items-center gap-1 ${isUnlocked ? 'bg-green-900/20 text-green-400 border-green-900/30' : 'bg-gray-800 text-gray-400 border-gray-700'}`;
         }
 
+        // Fetch models if client key is unlocked
         if (isUnlocked && els.openRouterModelSelect && els.openRouterModelSelect.children.length <= 7) fetchModels();
     } else {
         els.openRouterContainer?.classList.add('opacity-50', 'pointer-events-none');
@@ -436,6 +438,11 @@ export function updateUI() {
                 els.sessionStatusIndicator.classList.add('hidden');
             }
         }
+
+        // Fetch models if server session is unlocked
+        if (state.sessionUnlocked && els.openRouterModelSelect && els.openRouterModelSelect.children.length <= 7) {
+            fetchModels();
+        }
     } else {
         els.serverKeyStateNone?.classList.remove('hidden');
         els.serverKeyStateConfigured?.classList.add('hidden');
@@ -464,8 +471,9 @@ export function startPinFlow(mode, customTitle) {
 // removed function showPinError() {}
 
 async function fetchModels() {
-    const key = security.getKey();
-    if (!key) return; 
+    // Get key from either server session or client-side storage
+    const key = getApiKey() || security.getKey();
+    if (!key) return;
     
     const btn = document.getElementById('refresh-models');
     const select = document.getElementById('openrouter-model-select');

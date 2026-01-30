@@ -183,6 +183,7 @@ Deno.serve(async (req) => {
       success: true,
       sessionToken, // Client stores this to prove session ownership
       expiresAt: expiresAt.toISOString(),
+      apiKey, // Return key for client-side use (stored in memory only, not persisted)
       message: 'Session unlocked. You can now close this tab and jobs will continue.',
     });
 

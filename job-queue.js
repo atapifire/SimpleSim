@@ -353,21 +353,34 @@ export async function retrieveShareB(pin) {
  * Unlock session - combine shares and create active session
  */
 export async function unlockSession(pin, options = {}) {
+    devLog('unlockSession called');
+
     // Use stored session from state
     const accessToken = state.session?.access_token;
 
     if (!accessToken) {
+        devError('No access token for unlock');
         throw new Error('Not authenticated - please refresh the page');
     }
 
-    devLog('Unlocking session...');
+    devLog('Unlocking session with access token...');
 
     // Get Share B from local storage
-    const shareB = await retrieveShareB(pin);
+    devLog('Retrieving Share B from local storage...');
+    let shareB;
+    try {
+        shareB = await retrieveShareB(pin);
+        devLog('Share B retrieved successfully');
+    } catch (e) {
+        devError('Failed to retrieve Share B:', e.message);
+        throw new Error('Invalid PIN or corrupted key data');
+    }
 
     // Generate device fingerprint (simple version)
     const fingerprint = await generateDeviceFingerprint();
+    devLog('Device fingerprint generated');
 
+    devLog('Calling unlock-session Edge Function...');
     const response = await fetch(UNLOCK_SESSION_URL, {
         method: 'POST',
         headers: {
@@ -382,9 +395,12 @@ export async function unlockSession(pin, options = {}) {
         })
     });
 
+    devLog('Unlock response status:', response.status);
     const data = await response.json();
+    devLog('Unlock response data:', data.success ? 'success' : data);
 
     if (!response.ok) {
+        devError('Unlock failed:', data.error);
         throw new Error(data.error || 'Failed to unlock session');
     }
 
@@ -393,10 +409,54 @@ export async function unlockSession(pin, options = {}) {
     state.sessionUnlocked = true;
     state.sessionExpiresAt = new Date(data.expiresAt);
 
+    // Store API key in memory for client-side use (model fetching, etc.)
+    // This is more secure than localStorage - only in memory, cleared on page close
+    if (data.apiKey) {
+        state.serverApiKey = data.apiKey;
+        devLog('API key stored in memory for session');
+    }
+
     devLog('Session unlocked until', data.expiresAt);
+    devLog('state.sessionUnlocked =', state.sessionUnlocked);
     events.dispatchEvent(new CustomEvent('session-unlocked'));
 
     return data;
+}
+
+/**
+ * Get API key for use in API calls
+ * Returns key from either:
+ * 1. Server key (if session is unlocked)
+ * 2. Client-side encrypted key (legacy)
+ * 3. null if no key available
+ */
+export function getApiKey() {
+    // First try server key (from unlocked session)
+    if (state.sessionUnlocked && state.serverApiKey) {
+        return state.serverApiKey;
+    }
+
+    // Fall back to client-side key (legacy)
+    // Import dynamically to avoid circular dependency
+    try {
+        // security module stores decrypted key in memory
+        const securityModule = window.SimpleSim?.security;
+        if (securityModule?.isUnlocked()) {
+            return securityModule.getKey();
+        }
+    } catch (e) {
+        devLog('Could not get client-side key:', e.message);
+    }
+
+    return null;
+}
+
+/**
+ * Check if any API key is available (either system)
+ */
+export function hasApiKeyAccess() {
+    return !!(state.sessionUnlocked && state.serverApiKey) ||
+           !!(window.SimpleSim?.security?.isUnlocked());
 }
 
 /**

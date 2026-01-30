@@ -449,16 +449,21 @@ async function checkForPendingJobs() {
 }
 
 /**
- * Check if background jobs should be used
+ * Check if background jobs should be used for generation
+ * (only returns true if fully ready - key configured AND session unlocked)
  */
 function shouldUseBackgroundJobs() {
-    // Use background jobs if:
-    // 1. Setting is enabled
-    // 2. User has server key configured
-    // 3. Session is unlocked
     return state.settings.useBackgroundJobs &&
            hasServerKey() &&
            state.sessionUnlocked;
+}
+
+/**
+ * Check if user has server key configured (regardless of session state)
+ * Used to determine which unlock flow to use
+ */
+function hasServerKeyConfigured() {
+    return state.settings.hasServerKey && hasServerKey();
 }
 
 async function handleSend(isRetry = false) {
@@ -473,18 +478,18 @@ async function handleSend(isRetry = false) {
         return;
     }
 
-    // Check if we should use background jobs
-    const useBackgroundMode = shouldUseBackgroundJobs();
+    // Check which key system to use
+    const useServerKey = hasServerKeyConfigured();
 
-    if (useBackgroundMode) {
-        // Background job mode - check session is unlocked
+    if (useServerKey) {
+        // Server key mode - check session is unlocked
         if (!state.sessionUnlocked) {
             state.pendingPrompt = prompt;
             startPinFlow('unlock-session', "Unlock Session for Background Jobs");
             return;
         }
     } else {
-        // Synchronous mode - check API key is unlocked
+        // Client-side key mode - check API key is unlocked
         if (!security.isUnlocked()) {
             state.pendingPrompt = prompt;
             startPinFlow('unlock', "Unlock API Key to Generate");
@@ -847,8 +852,14 @@ function setupModelSelector() {
     btn?.addEventListener('click', async (e) => {
         e.stopPropagation();
 
-        if (!security.isUnlocked()) {
-            startPinFlow('unlock', "Unlock to select model");
+        // Check if either key system is unlocked
+        const hasAccess = security.isUnlocked() || (hasServerKeyConfigured() && state.sessionUnlocked);
+        if (!hasAccess) {
+            if (hasServerKeyConfigured()) {
+                startPinFlow('unlock-session', "Unlock to select model");
+            } else {
+                startPinFlow('unlock', "Unlock to select model");
+            }
             return;
         }
 

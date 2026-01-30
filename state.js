@@ -48,6 +48,7 @@ export const state = {
     jobSubscription: null, // Realtime subscription cleanup function
     sessionUnlocked: false, // Whether user has unlocked their session
     sessionExpiresAt: null, // When the session expires
+    serverApiKey: null, // API key from unlocked session (memory only, not persisted)
 
     // Temp state for PIN flows
     pinFlow: null,
