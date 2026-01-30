@@ -1,0 +1,30 @@
+name: Job Scheduler
+
+on:
+  schedule:
+    # Run every minute
+    - cron: '* * * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  trigger-jobs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Job Scheduler
+        run: |
+          response=$(curl -s -w "\n%{http_code}" \
+            -X GET \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://ouvrecllkqtwbtrwyhgw.supabase.co/functions/v1/job-scheduler")
+
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+
+          echo "Response: $body"
+          echo "HTTP Code: $http_code"
+
+          if [ "$http_code" -ge 400 ]; then
+            echo "Job scheduler returned error"
+            exit 1
+          fi
