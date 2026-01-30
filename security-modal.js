@@ -162,13 +162,23 @@ async function handlePinConfirm() {
         const pin = document.getElementById('input-pin-setup').value.trim();
 
         console.log('[Background Jobs] Starting server key setup...');
+        console.log('[Background Jobs] API key length:', apiKey.length, 'starts with sk-or-:', apiKey.startsWith('sk-or-'));
+        console.log('[Background Jobs] PIN length:', pin.length);
 
-        if (!apiKey.startsWith('sk-or-')) return showPinError("Invalid Key (must start with sk-or-)");
-        if (pin.length < 8) return showPinError("PIN must be 8+ digits for server keys");
+        if (!apiKey.startsWith('sk-or-')) {
+            console.log('[Background Jobs] Invalid API key format');
+            return showPinError("Invalid Key (must start with sk-or-)");
+        }
+        if (pin.length < 8) {
+            console.log('[Background Jobs] PIN too short');
+            return showPinError("PIN must be 8+ digits for server keys");
+        }
+
+        console.log('[Background Jobs] Validation passed, calling setLoading...');
 
         try {
             setLoading(true, "Setting up zero-knowledge key storage...");
-            console.log('[Background Jobs] Calling storeServerKey...');
+            console.log('[Background Jobs] setLoading done, calling storeServerKey...');
 
             // 1. Send to server - receives Share B back
             const result = await storeServerKey(apiKey, {
