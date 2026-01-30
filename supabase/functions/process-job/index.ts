@@ -143,18 +143,56 @@ Deno.serve(async (req) => {
     let jobData: JobData | null = null;
 
     if (body.jobId) {
-      // Resume a specific job
+      // Process a specific job (either resume processing or claim pending)
       const { data, error } = await serviceClient
         .from('jobs')
         .select('*')
         .eq('id', body.jobId)
         .single();
 
-      if (!error && data && data.status === 'processing') {
+      if (error) {
+        console.error('Error fetching job:', error);
+        return jsonResponse({ error: 'Job not found: ' + error.message });
+      }
+
+      if (!data) {
+        return jsonResponse({ error: 'Job not found' });
+      }
+
+      if (data.status === 'processing') {
+        // Resume an already-processing job
         jobData = data as JobData;
+      } else if (data.status === 'pending') {
+        // Claim this specific pending job
+        const { error: claimError } = await serviceClient
+          .from('jobs')
+          .update({
+            status: 'processing',
+            started_at: new Date().toISOString(),
+            last_heartbeat: new Date().toISOString(),
+          })
+          .eq('id', body.jobId)
+          .eq('status', 'pending'); // Only if still pending
+
+        if (claimError) {
+          console.error('Error claiming job:', claimError);
+          return jsonResponse({ error: 'Failed to claim job' });
+        }
+
+        // Re-fetch the updated job
+        const { data: claimedJob } = await serviceClient
+          .from('jobs')
+          .select('*')
+          .eq('id', body.jobId)
+          .single();
+
+        jobData = claimedJob as JobData;
+      } else {
+        console.log(`Job ${body.jobId} has status ${data.status}, skipping`);
+        return jsonResponse({ message: `Job already ${data.status}` });
       }
     } else {
-      // Claim next pending job
+      // Claim next pending job (for backwards compatibility)
       const { data, error } = await serviceClient.rpc('claim_pending_job');
 
       if (!error && data && data.length > 0) {
@@ -248,20 +286,43 @@ async function getApiKeyFromSession(
   client: ReturnType<typeof createServiceClient>,
   userId: string
 ): Promise<string | null> {
-  const { data: session } = await client
+  console.log(`[getApiKeyFromSession] Looking for session for user ${userId}`);
+
+  const { data: session, error: sessionError } = await client
     .from('active_sessions')
     .select('encrypted_combined_key, expires_at')
     .eq('user_id', userId)
     .gt('expires_at', new Date().toISOString())
-    .single();
+    .limit(1);
 
-  if (!session || !session.encrypted_combined_key) {
+  if (sessionError) {
+    console.error('[getApiKeyFromSession] Error querying sessions:', sessionError);
     return null;
   }
 
+  if (!session || session.length === 0) {
+    console.log('[getApiKeyFromSession] No active session found for user');
+    return null;
+  }
+
+  const activeSession = session[0];
+  if (!activeSession.encrypted_combined_key) {
+    console.log('[getApiKeyFromSession] Session exists but no encrypted key');
+    return null;
+  }
+
+  console.log(`[getApiKeyFromSession] Found session expiring at ${activeSession.expires_at}`);
+
   try {
-    const encryptedData = JSON.parse(session.encrypted_combined_key);
-    const sessionKey = fromHex(SESSION_SECRET!.padEnd(64, '0').slice(0, 64));
+    const encryptedData = JSON.parse(activeSession.encrypted_combined_key);
+    console.log('[getApiKeyFromSession] Encrypted data has keys:', Object.keys(encryptedData));
+
+    if (!SESSION_SECRET) {
+      console.error('[getApiKeyFromSession] SESSION_SECRET not configured!');
+      return null;
+    }
+
+    const sessionKey = fromHex(SESSION_SECRET.padEnd(64, '0').slice(0, 64));
 
     const decrypted = await decryptAES(
       fromBase64(encryptedData.ciphertext),
@@ -270,9 +331,11 @@ async function getApiKeyFromSession(
       sessionKey
     );
 
-    return new TextDecoder().decode(decrypted);
+    const apiKey = new TextDecoder().decode(decrypted);
+    console.log(`[getApiKeyFromSession] Successfully decrypted key (length: ${apiKey.length})`);
+    return apiKey;
   } catch (error) {
-    console.error('Failed to decrypt session key:', error);
+    console.error('[getApiKeyFromSession] Failed to decrypt session key:', error);
     return null;
   }
 }

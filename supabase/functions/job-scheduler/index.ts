@@ -130,7 +130,7 @@ Deno.serve(async (req) => {
 
       console.log(`User ${job.user_id} has active session until ${session.expires_at}`);
 
-      // Invoke process-job function
+      // Invoke process-job function with specific job ID
       try {
         const response = await fetch(PROCESS_JOB_URL, {
           method: 'POST',
@@ -139,11 +139,14 @@ Deno.serve(async (req) => {
             'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
           },
           body: JSON.stringify({
-            jobId: job.isResume ? job.id : undefined,
+            jobId: job.id, // Always pass job ID for precise targeting
           }),
         });
 
-        if (response.ok) {
+        const responseBody = await response.json().catch(() => ({ error: 'Invalid response' }));
+        console.log(`Process-job response for ${job.id}:`, responseBody);
+
+        if (response.ok && responseBody.success) {
           if (job.isResume) {
             results.jobsResumed++;
             console.log(`Resumed agent job ${job.id} at iteration ${job.current_iteration}`);
@@ -152,9 +155,9 @@ Deno.serve(async (req) => {
             console.log(`Started job ${job.id} (${job.job_type})`);
           }
         } else {
-          const errorText = await response.text();
-          console.error(`Failed to process job ${job.id}:`, errorText);
-          results.errors.push(`Job ${job.id}: ${errorText}`);
+          const errorMsg = responseBody.error || responseBody.message || `HTTP ${response.status}`;
+          console.error(`Failed to process job ${job.id}:`, errorMsg);
+          results.errors.push(`Job ${job.id}: ${errorMsg}`);
         }
       } catch (invokeError) {
         console.error(`Error invoking process-job for ${job.id}:`, invokeError);
