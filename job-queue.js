@@ -246,29 +246,36 @@ export async function storeServerKey(apiKey, options = {}) {
 
     devLog('User authenticated:', state.user.id);
 
-    // Always get a fresh session to ensure token is valid
-    // This prevents issues with stale tokens after logout/login
-    devLog('Getting fresh session...');
-    try {
-        const { data: { session }, error } = await supabase.auth.getSession();
-        if (error) {
-            devError('getSession error:', error.message);
-            throw new Error('Failed to get session: ' + error.message);
+    // Get access token - prefer cached session to avoid getSession() hanging
+    let token = state.session?.access_token;
+
+    if (!token) {
+        devLog('No cached token, getting fresh session with timeout...');
+        // Use timeout to prevent hanging (getSession can hang indefinitely)
+        try {
+            const result = await Promise.race([
+                supabase.auth.getSession(),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Session fetch timeout')), 5000)
+                )
+            ]);
+            const { data: { session }, error } = result;
+            if (error) {
+                devError('getSession error:', error.message);
+            } else if (session?.access_token) {
+                state.session = session;
+                token = session.access_token;
+                devLog('Got fresh session');
+            }
+        } catch (e) {
+            devError('Session fetch failed/timed out:', e.message);
         }
-        if (session?.access_token) {
-            state.session = session;
-            devLog('Got fresh session, token expires:', session.expires_at);
-        } else {
-            throw new Error('No valid session');
-        }
-    } catch (e) {
-        devError('Failed to get session:', e.message);
-        throw new Error('Not authenticated - please refresh the page');
+    } else {
+        devLog('Using cached session token');
     }
 
-    const token = state.session?.access_token;
     if (!token) {
-        throw new Error('Authentication failed - no token available');
+        throw new Error('Not authenticated - please refresh the page');
     }
 
     devLog('Got access token, storing server key with sharding...');
@@ -354,26 +361,33 @@ export async function retrieveShareB(pin) {
 export async function unlockSession(pin, options = {}) {
     devLog('unlockSession called');
 
-    // Always get a fresh session to ensure token is valid
-    devLog('Getting fresh session for unlock...');
-    try {
-        const { data: { session }, error } = await supabase.auth.getSession();
-        if (error) {
-            devError('getSession error:', error.message);
-            throw new Error('Failed to get session: ' + error.message);
+    // Get access token - prefer cached session to avoid getSession() hanging
+    let accessToken = state.session?.access_token;
+
+    if (!accessToken) {
+        devLog('No cached token, getting fresh session with timeout...');
+        try {
+            const result = await Promise.race([
+                supabase.auth.getSession(),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Session fetch timeout')), 5000)
+                )
+            ]);
+            const { data: { session }, error } = result;
+            if (error) {
+                devError('getSession error:', error.message);
+            } else if (session?.access_token) {
+                state.session = session;
+                accessToken = session.access_token;
+                devLog('Got fresh session');
+            }
+        } catch (e) {
+            devError('Session fetch failed/timed out:', e.message);
         }
-        if (session?.access_token) {
-            state.session = session;
-            devLog('Got fresh session');
-        } else {
-            throw new Error('No valid session');
-        }
-    } catch (e) {
-        devError('Failed to get session:', e.message);
-        throw new Error('Not authenticated - please refresh the page');
+    } else {
+        devLog('Using cached session token');
     }
 
-    const accessToken = state.session?.access_token;
     if (!accessToken) {
         devError('No access token for unlock');
         throw new Error('Not authenticated - please refresh the page');
