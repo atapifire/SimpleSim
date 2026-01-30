@@ -8,6 +8,7 @@ import { security } from './security.js';
 import { thinking, devLog, devError } from './thinking.js';
 import { analyzeProjectHealth, generateCodeMap, estimateTokens, formatTokenCount } from './tokens.js';
 import { checkModelToolSupport } from './ai.js';
+import { getApiKey } from './job-queue.js';
 
 // Agent configuration
 const MAX_ITERATIONS = 10;
@@ -275,7 +276,8 @@ export async function runAgent(prompt, currentFiles) {
     workingFiles = isNewProject ? [] : JSON.parse(JSON.stringify(currentFiles));
     iterationCount = 0;
 
-    const key = security.getKey();
+    // Get key from either server session or client-side storage
+    const key = getApiKey() || security.getKey();
     if (!key) throw new Error("OpenRouter Key Locked or Missing");
 
     thinking.show();

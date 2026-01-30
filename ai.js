@@ -2,6 +2,7 @@ import { state } from './state.js';
 import { security } from './security.js';
 import { thinking, devLog, devError } from './thinking.js';
 import { analyzeProjectHealth, generateCodeMap, estimateTokens, formatTokenCount, buildRefactoringPrompt } from './tokens.js';
+import { getApiKey } from './job-queue.js';
 
 // Timeout for API requests (3 minutes for streaming)
 const API_TIMEOUT = 180000;
@@ -292,7 +293,8 @@ const RETRY_CONFIG = {
  * Make streaming API call to OpenRouter with retry logic
  */
 async function generateWithOpenRouter(messages, retryCount = 0) {
-    const key = security.getKey();
+    // Get key from either server session or client-side storage
+    const key = getApiKey() || security.getKey();
     if (!key) throw new Error("OpenRouter Key Locked or Missing");
 
     thinking.show();
@@ -697,7 +699,8 @@ function validateParsedResult(result) {
  * - is_free_tier: boolean (if provided by API)
  */
 export async function checkCredits() {
-    const key = security.getKey();
+    // Get key from either server session or client-side storage
+    const key = getApiKey() || security.getKey();
     if (!key) return null;
 
     try {
@@ -765,8 +768,13 @@ function detectToolSupport(model) {
  * Fetch models with capability information
  */
 export async function fetchModelsWithCredits() {
-    const key = security.getKey();
-    if (!key) return [];
+    // Get key from either server session or client-side storage
+    const key = getApiKey() || security.getKey();
+    if (!key) {
+        devLog('fetchModelsWithCredits: No API key available');
+        return [];
+    }
+    devLog('fetchModelsWithCredits: Got API key, fetching models...');
 
     try {
         const [modelsRes, creditsInfo] = await Promise.all([
