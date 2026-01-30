@@ -207,9 +207,11 @@ Deno.serve(async (req) => {
     console.log(`Processing job ${jobData.id} (${jobData.job_type})`);
 
     // Get the user's API key from active session
+    console.log(`[process-job] Getting API key for user ${jobData.user_id}`);
     const apiKey = await getApiKeyFromSession(serviceClient, jobData.user_id);
 
     if (!apiKey) {
+      console.error('[process-job] No API key found in session');
       await serviceClient.rpc('fail_job', {
         p_job_id: jobData.id,
         p_error_message: 'No active session. Please unlock your API key first.',
@@ -217,8 +219,12 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: 'No active session' });
     }
 
+    // Log API key info (partial, for debugging)
+    console.log(`[process-job] API key retrieved: ${apiKey.substring(0, 10)}... (length: ${apiKey.length})`);
+
     // Build request headers for COPPA/GDPR compliance
     const headers = buildRequestHeaders(apiKey, jobData);
+    console.log(`[process-job] Using model: ${jobData.model}`);
 
     let result: { files: FileResult[]; description: string; iterations?: number };
 
@@ -265,15 +271,7 @@ Deno.serve(async (req) => {
 
   } catch (error) {
     console.error('Job processing error:', error);
-
-    // Try to mark job as failed
-    const body = await req.json().catch(() => ({}));
-    if (body.jobId) {
-      await serviceClient.rpc('fail_job', {
-        p_job_id: body.jobId,
-        p_error_message: error.message || 'Unknown error',
-      });
-    }
+    console.error('Error stack:', error.stack);
 
     return errorResponse('Job processing failed: ' + error.message, 500);
   }
@@ -484,21 +482,34 @@ async function runAgentGeneration(
       .eq('id', jobData.id);
 
     try {
+      const requestBody = {
+        model: jobData.model,
+        messages,
+        tools: AGENT_TOOLS,
+        tool_choice: 'auto',
+      };
+
+      console.log(`[process-job] Calling OpenRouter with model: ${jobData.model}`);
+      console.log(`[process-job] Message count: ${messages.length}`);
+
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          model: jobData.model,
-          messages,
-          tools: AGENT_TOOLS,
-          tool_choice: 'auto',
-        }),
+        body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(AGENT_ITERATION_TIMEOUT_MS),
       });
 
+      console.log(`[process-job] OpenRouter response status: ${response.status}`);
+
       if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(error.error?.message || `API error: ${response.status}`);
+        const errorBody = await response.text();
+        console.error(`[process-job] OpenRouter error: ${response.status} - ${errorBody}`);
+        let errorMsg = `API error: ${response.status}`;
+        try {
+          const errorJson = JSON.parse(errorBody);
+          errorMsg = errorJson.error?.message || errorJson.message || errorMsg;
+        } catch {}
+        throw new Error(errorMsg);
       }
 
       const data = await response.json();
