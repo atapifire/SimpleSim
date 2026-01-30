@@ -528,8 +528,10 @@ async function handleSend(isRetry = false) {
 
     const currentFiles = getCurrentFiles();
 
-    // Background job mode - use if server key is configured and setting is enabled
-    const useBackgroundMode = useServerKey && state.settings.useBackgroundJobs;
+    // Background job mode is disabled - requires cron/scheduler setup (Vercel Pro or external)
+    // Jobs would be submitted but never processed without the scheduler
+    // Force synchronous mode which works immediately with the server API key
+    const useBackgroundMode = false;
 
     if (useBackgroundMode) {
         devLog('Using BACKGROUND JOB mode');
