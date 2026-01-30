@@ -17,6 +17,85 @@ const SUPABASE_URL = 'https://ouvrecllkqtwbtrwyhgw.supabase.co';
 const STORE_KEY_URL = `${SUPABASE_URL}/functions/v1/store-api-key`;
 const UNLOCK_SESSION_URL = `${SUPABASE_URL}/functions/v1/unlock-session`;
 
+/**
+ * Get a valid access token, refreshing if necessary
+ * This handles the case where cached tokens are stale/expired
+ */
+async function getValidAccessToken(forceRefresh = false) {
+    // If not forcing refresh, try cached token first
+    if (!forceRefresh && state.session?.access_token) {
+        devLog('Using cached session token');
+        return state.session.access_token;
+    }
+
+    devLog('Refreshing session token...');
+
+    // Try to refresh the session
+    try {
+        const { data, error } = await supabase.auth.refreshSession();
+        if (error) {
+            devError('refreshSession error:', error.message);
+            // Fall back to getSession
+            const { data: sessionData } = await supabase.auth.getSession();
+            if (sessionData?.session?.access_token) {
+                state.session = sessionData.session;
+                devLog('Got session via getSession');
+                return sessionData.session.access_token;
+            }
+        } else if (data?.session?.access_token) {
+            state.session = data.session;
+            devLog('Session refreshed successfully');
+            return data.session.access_token;
+        }
+    } catch (e) {
+        devError('Token refresh failed:', e.message);
+    }
+
+    return null;
+}
+
+/**
+ * Make an authenticated request to an Edge Function with automatic token refresh on 401
+ */
+async function authenticatedFetch(url, options = {}, retryOnAuth = true) {
+    let token = await getValidAccessToken(false);
+
+    if (!token) {
+        throw new Error('Not authenticated - please refresh the page');
+    }
+
+    const response = await fetch(url, {
+        ...options,
+        headers: {
+            ...options.headers,
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+        }
+    });
+
+    // If we get 401 and haven't retried, refresh token and retry once
+    if (response.status === 401 && retryOnAuth) {
+        devLog('Got 401, refreshing token and retrying...');
+        token = await getValidAccessToken(true);
+
+        if (!token) {
+            throw new Error('Session expired - please log in again');
+        }
+
+        // Retry with new token
+        return fetch(url, {
+            ...options,
+            headers: {
+                ...options.headers,
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            }
+        });
+    }
+
+    return response;
+}
+
 // ============================================
 // Shamir's Secret Sharing (Browser Implementation)
 // ============================================
@@ -245,49 +324,11 @@ export async function storeServerKey(apiKey, options = {}) {
     }
 
     devLog('User authenticated:', state.user.id);
-
-    // Get access token - prefer cached session to avoid getSession() hanging
-    let token = state.session?.access_token;
-
-    if (!token) {
-        devLog('No cached token, getting fresh session with timeout...');
-        // Use timeout to prevent hanging (getSession can hang indefinitely)
-        try {
-            const result = await Promise.race([
-                supabase.auth.getSession(),
-                new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('Session fetch timeout')), 5000)
-                )
-            ]);
-            const { data: { session }, error } = result;
-            if (error) {
-                devError('getSession error:', error.message);
-            } else if (session?.access_token) {
-                state.session = session;
-                token = session.access_token;
-                devLog('Got fresh session');
-            }
-        } catch (e) {
-            devError('Session fetch failed/timed out:', e.message);
-        }
-    } else {
-        devLog('Using cached session token');
-    }
-
-    if (!token) {
-        throw new Error('Not authenticated - please refresh the page');
-    }
-
-    devLog('Got access token, storing server key with sharding...');
     devLog('POST to:', STORE_KEY_URL);
 
     try {
-        const response = await fetch(STORE_KEY_URL, {
+        const response = await authenticatedFetch(STORE_KEY_URL, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
-            },
             body: JSON.stringify({
                 apiKey,
                 provider: options.provider || 'openrouter',
@@ -361,41 +402,7 @@ export async function retrieveShareB(pin) {
 export async function unlockSession(pin, options = {}) {
     devLog('unlockSession called');
 
-    // Get access token - prefer cached session to avoid getSession() hanging
-    let accessToken = state.session?.access_token;
-
-    if (!accessToken) {
-        devLog('No cached token, getting fresh session with timeout...');
-        try {
-            const result = await Promise.race([
-                supabase.auth.getSession(),
-                new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('Session fetch timeout')), 5000)
-                )
-            ]);
-            const { data: { session }, error } = result;
-            if (error) {
-                devError('getSession error:', error.message);
-            } else if (session?.access_token) {
-                state.session = session;
-                accessToken = session.access_token;
-                devLog('Got fresh session');
-            }
-        } catch (e) {
-            devError('Session fetch failed/timed out:', e.message);
-        }
-    } else {
-        devLog('Using cached session token');
-    }
-
-    if (!accessToken) {
-        devError('No access token for unlock');
-        throw new Error('Not authenticated - please refresh the page');
-    }
-
-    devLog('Unlocking session with access token...');
-
-    // Get Share B from local storage
+    // Get Share B from local storage first (before network calls)
     devLog('Retrieving Share B from local storage...');
     let shareB;
     try {
@@ -411,12 +418,8 @@ export async function unlockSession(pin, options = {}) {
     devLog('Device fingerprint generated');
 
     devLog('Calling unlock-session Edge Function...');
-    const response = await fetch(UNLOCK_SESSION_URL, {
+    const response = await authenticatedFetch(UNLOCK_SESSION_URL, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`
-        },
         body: JSON.stringify({
             shareB,
             provider: options.provider || 'openrouter',
