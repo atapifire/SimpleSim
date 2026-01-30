@@ -4,9 +4,22 @@ import { showToast, setLoading, setupVoiceInput } from './utils.js';
 import { initSettings, startPinFlow } from './settings.js';
 import { initProjects, loadProject, getCurrentFiles, createProject, createVersion } from './projects.js';
 import { generateProject, checkCredits, fetchModelsWithCredits, refactorLargeFile, analyzeProjectHealth, formatTokenCount } from './ai.js';
-import { thinking, isDev, devLog } from './thinking.js';
+import { thinking, isDev, devLog, devError } from './thinking.js';
 import { getRefactoringSuggestions, getStatusColor } from './tokens.js';
 import { runAgent, isAgentModeEnabled, setAgentMode, supportsToolCalling } from './agent.js';
+import {
+    initJobQueue,
+    submitJob,
+    subscribeToJob,
+    cancelJob,
+    checkCompletedJobs,
+    getPendingJobs,
+    hasServerKey,
+    checkSessionStatus,
+    unlockSession,
+    getSessionTimeRemaining,
+    formatTimeRemaining
+} from './job-queue.js';
 
 // --- Initialization ---
 async function init() {
@@ -19,6 +32,9 @@ async function init() {
     // Inject model selector dropdown
     injectModelSelector();
 
+    // Inject job progress UI
+    injectJobProgressUI();
+
     // Initialize thinking UI
     thinking.init();
 
@@ -27,6 +43,10 @@ async function init() {
     setupEventListeners();
     setupModelSelector();
     setupAgentModeToggle();
+    setupJobEventListeners();
+
+    // Initialize background job queue
+    await initJobQueue();
 
     // Dev mode indicator
     if (isDev) {
@@ -40,7 +60,13 @@ async function init() {
     // Resume previous project if ID exists AND user is logged in
     if (state.projectId && state.user) {
         await loadProject(state.projectId);
+
+        // Check for jobs completed while user was away
+        await checkForCompletedJobsOnLoad();
     }
+
+    // Check for any pending jobs
+    await checkForPendingJobs();
 
     document.getElementById('prompt-input')?.focus();
 
@@ -173,6 +199,268 @@ function setupEventListeners() {
     });
 }
 
+// --- Job Progress UI ---
+function injectJobProgressUI() {
+    const container = document.createElement('div');
+    container.id = 'job-progress-container';
+    container.className = 'fixed bottom-24 left-1/2 -translate-x-1/2 z-40 hidden';
+    container.innerHTML = `
+        <div class="bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-2xl shadow-2xl p-4 w-80 max-w-[90vw]">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                    <div id="job-status-indicator" class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
+                    <span id="job-status-text" class="text-sm font-medium text-white">Processing...</span>
+                </div>
+                <button id="btn-cancel-job" class="text-gray-400 hover:text-red-400 transition-colors p-1" title="Cancel job">
+                    <i class="fa-solid fa-times"></i>
+                </button>
+            </div>
+
+            <div id="job-progress-bar-container" class="mb-3 hidden">
+                <div class="flex justify-between text-xs text-gray-500 mb-1">
+                    <span>Agent Progress</span>
+                    <span id="job-iteration-count">0/10</span>
+                </div>
+                <div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                    <div id="job-progress-bar" class="h-full bg-purple-500 transition-all duration-300" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <div class="flex items-center justify-between text-xs">
+                <span id="job-elapsed-time" class="text-gray-500">Elapsed: 0s</span>
+                <span class="text-green-400 flex items-center gap-1">
+                    <i class="fa-solid fa-cloud text-[10px]"></i>
+                    You can close this tab
+                </span>
+            </div>
+
+            <div id="job-session-warning" class="hidden mt-3 p-2 bg-yellow-900/30 border border-yellow-700/50 rounded-lg">
+                <div class="flex items-center gap-2 text-yellow-400 text-xs">
+                    <i class="fa-solid fa-clock"></i>
+                    <span>Session expires in <span id="session-time-remaining">--</span></span>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(container);
+
+    // Cancel button handler
+    document.getElementById('btn-cancel-job')?.addEventListener('click', handleCancelJob);
+}
+
+function showJobProgress(job) {
+    const container = document.getElementById('job-progress-container');
+    if (!container) return;
+
+    container.classList.remove('hidden');
+    state.jobStartTime = Date.now();
+
+    // Update UI based on job type
+    const isAgent = job.job_type === 'agent';
+    document.getElementById('job-progress-bar-container')?.classList.toggle('hidden', !isAgent);
+
+    updateJobProgressUI(job);
+
+    // Start elapsed time counter
+    if (state.jobElapsedInterval) clearInterval(state.jobElapsedInterval);
+    state.jobElapsedInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - state.jobStartTime) / 1000);
+        const elapsedEl = document.getElementById('job-elapsed-time');
+        if (elapsedEl) {
+            if (elapsed < 60) {
+                elapsedEl.textContent = `Elapsed: ${elapsed}s`;
+            } else {
+                elapsedEl.textContent = `Elapsed: ${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+            }
+        }
+    }, 1000);
+}
+
+function updateJobProgressUI(job) {
+    const statusText = document.getElementById('job-status-text');
+    const statusIndicator = document.getElementById('job-status-indicator');
+    const iterationCount = document.getElementById('job-iteration-count');
+    const progressBar = document.getElementById('job-progress-bar');
+
+    if (statusText) {
+        const statusMap = {
+            'pending': 'Queued...',
+            'processing': job.job_type === 'agent' ? 'Agent working...' : 'Generating...',
+            'completed': 'Complete!',
+            'failed': 'Failed',
+            'cancelled': 'Cancelled'
+        };
+        statusText.textContent = statusMap[job.status] || job.status;
+    }
+
+    if (statusIndicator) {
+        const colorMap = {
+            'pending': 'bg-yellow-500',
+            'processing': 'bg-blue-500 animate-pulse',
+            'completed': 'bg-green-500',
+            'failed': 'bg-red-500',
+            'cancelled': 'bg-gray-500'
+        };
+        statusIndicator.className = `w-2 h-2 rounded-full ${colorMap[job.status] || 'bg-gray-500'}`;
+    }
+
+    if (job.job_type === 'agent' && job.current_iteration !== undefined) {
+        const maxIter = job.max_iterations || 10;
+        if (iterationCount) {
+            iterationCount.textContent = `${job.current_iteration}/${maxIter}`;
+        }
+        if (progressBar) {
+            progressBar.style.width = `${(job.current_iteration / maxIter) * 100}%`;
+        }
+    }
+}
+
+function hideJobProgress() {
+    const container = document.getElementById('job-progress-container');
+    if (container) container.classList.add('hidden');
+
+    if (state.jobElapsedInterval) {
+        clearInterval(state.jobElapsedInterval);
+        state.jobElapsedInterval = null;
+    }
+}
+
+async function handleCancelJob() {
+    if (!state.currentJob) return;
+
+    try {
+        await cancelJob(state.currentJob.id);
+        showToast('Job cancelled');
+        hideJobProgress();
+        state.currentJob = null;
+    } catch (error) {
+        showToast('Failed to cancel job: ' + error.message);
+    }
+}
+
+function setupJobEventListeners() {
+    // Listen for job events
+    events.addEventListener('job-submitted', (e) => {
+        devLog('Job submitted event:', e.detail);
+        showJobProgress(e.detail);
+    });
+
+    events.addEventListener('job-cancelled', () => {
+        hideJobProgress();
+    });
+
+    events.addEventListener('session-expiring', (e) => {
+        const warning = document.getElementById('job-session-warning');
+        const timeEl = document.getElementById('session-time-remaining');
+        if (warning && timeEl) {
+            warning.classList.remove('hidden');
+            timeEl.textContent = formatTimeRemaining(e.detail.remaining);
+        }
+    });
+
+    events.addEventListener('session-expired', () => {
+        showToast('Session expired. Please unlock to continue.');
+        hideJobProgress();
+    });
+
+    events.addEventListener('session-unlocked', () => {
+        const warning = document.getElementById('job-session-warning');
+        if (warning) warning.classList.add('hidden');
+        devLog('Session unlocked');
+    });
+}
+
+async function checkForCompletedJobsOnLoad() {
+    if (!state.projectId || !state.user) return;
+
+    try {
+        const completedJobs = await checkCompletedJobs(state.projectId);
+
+        if (completedJobs.length > 0) {
+            const latestJob = completedJobs[0];
+            devLog('Found completed job from background:', latestJob.id);
+
+            // Reload the project to get the new version
+            await loadProject(state.projectId, true);
+
+            const jobCount = completedJobs.length;
+            showToast(`${jobCount} background job${jobCount > 1 ? 's' : ''} completed while you were away!`);
+        }
+    } catch (error) {
+        devError('Error checking completed jobs:', error);
+    }
+}
+
+async function checkForPendingJobs() {
+    if (!state.user) return;
+
+    try {
+        const pendingJobs = await getPendingJobs();
+
+        if (pendingJobs.length > 0) {
+            // Subscribe to the most recent job
+            const latestJob = pendingJobs[0];
+            state.currentJob = latestJob;
+            showJobProgress(latestJob);
+
+            // Subscribe to updates
+            state.jobSubscription = subscribeToJob(latestJob.id, {
+                onStatusChange: (status) => {
+                    if (state.currentJob) {
+                        state.currentJob.status = status;
+                        updateJobProgressUI(state.currentJob);
+                    }
+                },
+                onProgress: (progress) => {
+                    if (state.currentJob) {
+                        state.currentJob.current_iteration = progress.iteration;
+                        state.currentJob.max_iterations = progress.maxIterations;
+                        updateJobProgressUI(state.currentJob);
+                    }
+                },
+                onComplete: async (result) => {
+                    devLog('Background job completed:', result);
+                    hideJobProgress();
+                    state.currentJob = null;
+
+                    // Reload project to show new version
+                    if (state.projectId) {
+                        await loadProject(state.projectId, true);
+                    }
+
+                    const modeLabel = result.iterations > 1
+                        ? `Agent completed in ${result.iterations} iterations`
+                        : 'Generation complete';
+                    showToast(modeLabel);
+                },
+                onError: (error) => {
+                    devError('Background job failed:', error);
+                    hideJobProgress();
+                    state.currentJob = null;
+                    showToast('Job failed: ' + error.message);
+                }
+            });
+
+            showToast(`Resuming ${pendingJobs.length > 1 ? pendingJobs.length + ' jobs' : 'job'} in progress...`);
+        }
+    } catch (error) {
+        devError('Error checking pending jobs:', error);
+    }
+}
+
+/**
+ * Check if background jobs should be used
+ */
+function shouldUseBackgroundJobs() {
+    // Use background jobs if:
+    // 1. Setting is enabled
+    // 2. User has server key configured
+    // 3. Session is unlocked
+    return state.settings.useBackgroundJobs &&
+           hasServerKey() &&
+           state.sessionUnlocked;
+}
+
 async function handleSend(isRetry = false) {
     const input = document.getElementById('prompt-input');
     const prompt = isRetry ? state.pendingPrompt : input.value.trim();
@@ -185,16 +473,124 @@ async function handleSend(isRetry = false) {
         return;
     }
 
-    // Security Check (API Key)
-    if (!security.isUnlocked()) {
-        state.pendingPrompt = prompt;
-        startPinFlow('unlock', "Unlock API Key to Generate");
+    // Check if we should use background jobs
+    const useBackgroundMode = shouldUseBackgroundJobs();
+
+    if (useBackgroundMode) {
+        // Background job mode - check session is unlocked
+        if (!state.sessionUnlocked) {
+            state.pendingPrompt = prompt;
+            startPinFlow('unlock-session', "Unlock Session for Background Jobs");
+            return;
+        }
+    } else {
+        // Synchronous mode - check API key is unlocked
+        if (!security.isUnlocked()) {
+            state.pendingPrompt = prompt;
+            startPinFlow('unlock', "Unlock API Key to Generate");
+            return;
+        }
+    }
+
+    if (state.isGenerating || state.currentJob) {
+        showToast('Generation already in progress');
         return;
     }
 
-    if (state.isGenerating) return;
-
     const useAgent = isAgentModeEnabled();
+
+    // Create Project if needed (before submitting job)
+    if (!state.projectId) {
+        const name = prompt.split(' ').slice(0, 4).join(' ') + (prompt.split(' ').length > 4 ? '...' : '');
+        devLog('Creating new project:', name);
+        try {
+            const project = await createProject(name);
+            state.projectId = project.id;
+            state.projectName = project.name;
+            state.versions = [];
+            state.currentVersionIndex = -1;
+
+            const url = new URL(window.location);
+            url.searchParams.set('project', project.id);
+            window.history.replaceState({}, '', url);
+
+            document.getElementById('current-project-name').textContent = project.name;
+        } catch (error) {
+            showToast('Failed to create project: ' + error.message);
+            return;
+        }
+    }
+
+    const currentFiles = getCurrentFiles();
+
+    // Background job mode
+    if (useBackgroundMode) {
+        devLog('Using BACKGROUND JOB mode');
+
+        try {
+            const job = await submitJob(state.projectId, prompt, currentFiles, {
+                isAgent: useAgent,
+                maxIterations: 10
+            });
+
+            // Clear input
+            input.value = '';
+            input.style.height = 'auto';
+            state.pendingPrompt = null;
+
+            // Subscribe to job updates
+            state.jobSubscription = subscribeToJob(job.id, {
+                onStatusChange: (status) => {
+                    job.status = status;
+                    updateJobProgressUI(job);
+                },
+                onProgress: (progress) => {
+                    job.current_iteration = progress.iteration;
+                    job.max_iterations = progress.maxIterations;
+                    updateJobProgressUI(job);
+                },
+                onComplete: async (result) => {
+                    devLog('Background job completed:', result);
+                    hideJobProgress();
+                    state.currentJob = null;
+                    if (state.jobSubscription) {
+                        state.jobSubscription();
+                        state.jobSubscription = null;
+                    }
+
+                    // Reload project to show new version
+                    await loadProject(state.projectId, true);
+
+                    const modeLabel = result.iterations > 1
+                        ? `Agent completed in ${result.iterations} iterations`
+                        : 'Generation complete';
+                    showToast(modeLabel);
+                },
+                onError: (error) => {
+                    devError('Background job failed:', error);
+                    hideJobProgress();
+                    state.currentJob = null;
+                    if (state.jobSubscription) {
+                        state.jobSubscription();
+                        state.jobSubscription = null;
+                    }
+                    showToast('Job failed: ' + error.message);
+                }
+            });
+
+            showToast(useAgent ? 'Agent job submitted - runs in background!' : 'Job submitted - runs in background!');
+
+        } catch (error) {
+            devError('Failed to submit job:', error);
+            showToast('Failed to submit job: ' + error.message);
+        }
+
+        return;
+    }
+
+    // Synchronous mode (fallback when no server key configured)
+    devLog('Using SYNCHRONOUS mode');
+
     const loadingText = state.projectId
         ? (useAgent ? "Agent refining project..." : "Refining project...")
         : (useAgent ? "Agent creating project..." : "Architecting new project...");
@@ -202,17 +598,9 @@ async function handleSend(isRetry = false) {
     setLoading(true, loadingText);
 
     try {
-        // Create Project if needed
         if (!state.projectId) {
-            const name = prompt.split(' ').slice(0, 4).join(' ') + (prompt.split(' ').length > 4 ? '...' : '');
-            const project = await createProject(name);
-            await loadProject(project.id);
-
-            // Wait a tick for state to update
-            await new Promise(r => setTimeout(r, 100));
+            throw new Error('Failed to initialize project');
         }
-
-        const currentFiles = getCurrentFiles();
 
         // Choose between Agent Mode and Normal Mode
         let result;
@@ -258,24 +646,97 @@ async function handleSend(isRetry = false) {
 
         state.pendingPrompt = null;
 
-        // Create version (and auto-commit via projects.js) only after agent completes
-        devLog('Creating version with', result.files.length, 'files');
-        await createVersion(state.projectId, {
-            prompt: prompt,
-            files: result.files,
-            description: result.description || "Updated project",
-        });
+        // Final state verification before saving
+        if (!state.projectId) {
+            throw new Error('Project ID lost during generation - please try again');
+        }
 
+        // Create version (and auto-commit via projects.js) only after agent completes
+        devLog('Creating version with', result.files.length, 'files for project:', state.projectId);
+
+        try {
+            await createVersion(state.projectId, {
+                prompt: prompt,
+                files: result.files,
+                description: result.description || "Updated project",
+            });
+        } catch (versionError) {
+            devError('Failed to create version:', versionError);
+            // Still show the preview even if saving failed
+            const { renderProject } = await import('./renderer.js');
+            renderProject(result.files);
+            document.getElementById('welcome-screen')?.classList.add('hidden');
+            showToast('Generated but failed to save: ' + versionError.message);
+            throw versionError;
+        }
+
+        // Clear input after successful save
         input.value = '';
         input.style.height = 'auto';
+
+        // Final UI verification - ensure preview is showing
+        document.getElementById('welcome-screen')?.classList.add('hidden');
+        document.getElementById('project-loader')?.classList.add('hidden');
 
         const modeLabel = useAgent ? `Agent completed in ${result.iterations || 1} iteration(s)` : 'Version generated';
         showToast(modeLabel);
 
+        devLog('Generation complete - project:', state.projectId, 'versions:', state.versions.length);
+
     } catch (error) {
         console.error('Generation error:', error);
         devLog('Full error:', error);
-        showToast("Generation failed: " + (error.message || "Please try again."));
+
+        // Check if this was an Agent Mode failure that could benefit from Simple Mode
+        const wasAgentMode = useAgent;
+        const isAgentToolError = error.message?.includes('Agent Mode') ||
+                                  error.message?.includes('no files') ||
+                                  error.message?.includes('empty response');
+
+        if (wasAgentMode && isAgentToolError) {
+            // Offer to retry in Simple Mode
+            const retrySimple = confirm(
+                `Agent Mode failed: ${error.message?.split('\n')[0] || 'Unknown error'}\n\n` +
+                `Would you like to retry in Simple Mode?\n\n` +
+                `(Simple Mode works with all models and is faster)`
+            );
+
+            if (retrySimple) {
+                devLog('Retrying in Simple Mode after Agent failure');
+                setAgentMode(false);
+                updateAgentModeUI();
+                // Retry the generation
+                setLoading(true, "Retrying in Simple Mode...");
+                try {
+                    const currentFiles = getCurrentFiles();
+                    const result = await generateProject(prompt, currentFiles);
+
+                    if (result?.files?.length > 0) {
+                        result.files = result.files.filter(f => f.path && typeof f.content === 'string');
+
+                        if (result.files.length > 0) {
+                            await createVersion(state.projectId, {
+                                prompt: prompt,
+                                files: result.files,
+                                description: result.description || "Updated project",
+                            });
+
+                            input.value = '';
+                            input.style.height = 'auto';
+                            showToast('Generated in Simple Mode');
+                            return;
+                        }
+                    }
+                    throw new Error('Simple Mode also failed');
+                } catch (retryError) {
+                    showToast("Retry failed: " + (retryError.message || "Please try again."));
+                }
+            } else {
+                showToast("Try switching to Simple Mode or a different model");
+            }
+        } else {
+            showToast("Generation failed: " + (error.message?.split('\n')[0] || "Please try again."));
+        }
     } finally {
         setLoading(false);
         thinking.hide(); // Ensure thinking UI is hidden

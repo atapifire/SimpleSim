@@ -30,6 +30,7 @@ export const state = {
         useOpenRouter: true, // Default to OpenRouter since we removed websim.chat
         openRouterModel: "anthropic/claude-3.5-sonnet",
         hasKey: false,
+        hasServerKey: false, // Server-side encrypted key with sharding
         useHuggingFace: false,
         hasHfKey: false,
         hfImageModel: "stabilityai/stable-diffusion-xl-base-1.0",
@@ -37,7 +38,15 @@ export const state = {
         githubAutoCreate: false,
         githubAutoSync: false,
         agentMode: false, // Toggle between Agent Mode (multi-pass) and Normal Mode (single output)
+        trainingOptOut: true, // COPPA/GDPR: Opt out of data training by default
+        useBackgroundJobs: true, // Use background job queue instead of synchronous generation
     },
+
+    // Background Job State
+    currentJob: null, // Currently running/pending job
+    jobSubscription: null, // Realtime subscription cleanup function
+    sessionUnlocked: false, // Whether user has unlocked their session
+    sessionExpiresAt: null, // When the session expires
 
     // Temp state for PIN flows
     pinFlow: null,

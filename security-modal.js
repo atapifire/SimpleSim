@@ -1,6 +1,7 @@
 import { state, events } from './state.js';
 import { security } from './security.js';
 import { showToast, setLoading } from './utils.js';
+import { storeServerKey, storeShareBLocally, unlockSession, hasServerKey } from './job-queue.js';
 
 const PIN_MODAL_HTML = `
 <div id="pin-modal" class="fixed inset-0 z-[70] hidden flex items-center justify-center p-4">
@@ -83,6 +84,19 @@ export function startPinFlow(mode, customTitle) {
         document.getElementById('pin-setup-fields').classList.remove('hidden');
         document.getElementById('pin-entry-fields').classList.add('hidden');
         document.getElementById('input-api-key').focus();
+    } else if (mode === 'setup-server-key') {
+        document.getElementById('pin-title').textContent = "Enable Background Jobs";
+        document.getElementById('pin-subtitle').textContent = "Your key is split for zero-knowledge security";
+        document.getElementById('input-api-key').placeholder = "sk-or-... (OpenRouter API Key)";
+        document.getElementById('pin-setup-fields').classList.remove('hidden');
+        document.getElementById('pin-entry-fields').classList.add('hidden');
+        document.getElementById('input-api-key').focus();
+    } else if (mode === 'unlock-session') {
+        document.getElementById('pin-title').textContent = customTitle || "Unlock Session";
+        document.getElementById('pin-subtitle').textContent = "Enter PIN to activate background jobs (2h session)";
+        document.getElementById('pin-setup-fields').classList.add('hidden');
+        document.getElementById('pin-entry-fields').classList.remove('hidden');
+        document.getElementById('input-pin-entry').focus();
     } else {
         document.getElementById('pin-title').textContent = customTitle || "Enter PIN";
         document.getElementById('pin-subtitle').textContent = "Unlock your API key to continue";
@@ -141,6 +155,69 @@ async function handlePinConfirm() {
             closePinModal();
             showToast("HuggingFace key saved");
         } catch (e) { showPinError("Encryption failed"); }
+
+    } else if (state.pinFlow === 'setup-server-key') {
+        // Server key setup with Shamir's Secret Sharing
+        const apiKey = document.getElementById('input-api-key').value.trim();
+        const pin = document.getElementById('input-pin-setup').value.trim();
+
+        if (!apiKey.startsWith('sk-or-')) return showPinError("Invalid Key (must start with sk-or-)");
+        if (pin.length < 8) return showPinError("PIN must be 8+ digits for server keys");
+
+        try {
+            setLoading(true, "Setting up zero-knowledge key storage...");
+
+            // 1. Send to server - receives Share B back
+            const { shareB, keyId } = await storeServerKey(apiKey, {
+                trainingOptOut: state.settings.trainingOptOut
+            });
+
+            // 2. Encrypt Share B locally with PIN
+            await storeShareBLocally(shareB, pin);
+
+            state.settings.hasServerKey = true;
+            callbacks.saveSettings();
+            callbacks.updateUI();
+            closePinModal();
+            setLoading(false);
+            showToast("Background jobs enabled! Your key is now sharded.");
+
+            // Automatically unlock the session
+            try {
+                await unlockSession(pin);
+                showToast("Session unlocked for 2 hours");
+            } catch (e) {
+                console.error("Auto-unlock failed:", e);
+            }
+
+        } catch (e) {
+            setLoading(false);
+            console.error("Server key setup failed:", e);
+            showPinError(e.message || "Failed to setup server key");
+        }
+
+    } else if (state.pinFlow === 'unlock-session') {
+        // Unlock session for background jobs
+        const pin = document.getElementById('input-pin-entry').value.trim();
+
+        if (!hasServerKey()) {
+            return showPinError("No server key configured");
+        }
+
+        try {
+            setLoading(true, "Unlocking session...");
+            await unlockSession(pin);
+            closePinModal();
+            setLoading(false);
+            callbacks.updateUI();
+            showToast("Session unlocked for 2 hours");
+            events.dispatchEvent(new CustomEvent('session-unlocked'));
+            if (state.pendingPrompt) events.dispatchEvent(new CustomEvent('retry-generation'));
+        } catch (e) {
+            setLoading(false);
+            console.error("Session unlock failed:", e);
+            showPinError(e.message || "Failed to unlock session");
+        }
 
     } else if (state.pinFlow === 'unlock') {
         const pin = document.getElementById('input-pin-entry').value.trim();

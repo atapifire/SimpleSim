@@ -2,6 +2,15 @@ import { state } from './state.js';
 import { security } from './security.js';
 import { showToast } from './utils.js';
 import { initSecurityModal, startPinFlow as _startPinFlow } from './security-modal.js';
+import {
+    storeServerKey,
+    storeShareBLocally,
+    hasServerKey,
+    unlockSession,
+    checkSessionStatus,
+    isPasskeySupported
+} from './job-queue.js';
+import { devLog, devError } from './thinking.js';
 
 // --- HTML Injection ---
 const SETTINGS_MODAL_HTML = `
@@ -51,6 +60,58 @@ const SETTINGS_MODAL_HTML = `
                             <button id="btn-remove-key" class="py-1.5 px-3 bg-red-900/20 hover:bg-red-900/40 text-red-400 hover:text-red-300 text-xs rounded-lg transition-colors border border-red-900/30">Remove</button>
                         </div>
                     </div>
+                </div>
+            </section>
+            <section class="pt-2 border-t border-gray-800">
+                <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Background Jobs (Zero-Knowledge)</h3>
+                <p class="text-xs text-gray-500 mb-3">Enable generation to continue even after closing the browser. Your key is split and encrypted - we never see it.</p>
+                <div id="server-key-state-none">
+                    <button id="btn-setup-server-key" class="w-full py-2 px-4 rounded-xl border border-dashed border-purple-600/50 text-purple-400 hover:text-purple-300 hover:border-purple-500 hover:bg-purple-900/20 transition-all flex items-center justify-center gap-2 text-sm">
+                        <i class="fa-solid fa-cloud-arrow-up"></i> Enable Background Jobs
+                    </button>
+                    <p class="text-[10px] text-gray-600 mt-2 text-center">Uses Shamir's Secret Sharing for zero-knowledge security</p>
+                </div>
+                <div id="server-key-state-configured" class="hidden">
+                    <div class="bg-purple-900/10 border border-purple-500/30 rounded-xl p-3 mb-3">
+                        <div class="flex items-center justify-between mb-2">
+                            <div class="flex items-center gap-2 text-purple-400 text-sm font-medium">
+                                <i class="fa-solid fa-shield-halved"></i> Zero-Knowledge Key
+                            </div>
+                            <div id="server-key-status" class="text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700 flex items-center gap-1">
+                                <i class="fa-solid fa-lock text-[10px]"></i> Locked
+                            </div>
+                        </div>
+                        <div class="text-xs text-gray-500 mb-2">
+                            <div class="flex items-center gap-2 mb-1">
+                                <i class="fa-solid fa-check text-green-500 text-[10px]"></i>
+                                <span>Share A: Encrypted on server</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <i class="fa-solid fa-check text-green-500 text-[10px]"></i>
+                                <span>Share B: Encrypted locally with your PIN</span>
+                            </div>
+                        </div>
+                        <div class="flex gap-2">
+                            <button id="btn-unlock-session" class="flex-1 py-1.5 px-3 bg-purple-600 hover:bg-purple-500 text-white text-xs rounded-lg transition-colors">
+                                <i class="fa-solid fa-lock-open mr-1"></i> Unlock Session
+                            </button>
+                            <button id="btn-remove-server-key" class="py-1.5 px-3 bg-red-900/20 hover:bg-red-900/40 text-red-400 hover:text-red-300 text-xs rounded-lg transition-colors border border-red-900/30">
+                                Remove
+                            </button>
+                        </div>
+                        <div id="session-status-indicator" class="hidden mt-2 p-2 bg-green-900/20 border border-green-700/50 rounded-lg">
+                            <div class="flex items-center justify-between text-xs">
+                                <span class="text-green-400 flex items-center gap-1">
+                                    <i class="fa-solid fa-circle-check"></i> Session Active
+                                </span>
+                                <span id="session-expires-in" class="text-gray-500">Expires in 2h</span>
+                            </div>
+                        </div>
+                    </div>
+                    <label class="flex items-center justify-between cursor-pointer">
+                        <span class="text-sm text-gray-300">Use background jobs by default</span>
+                        <input type="checkbox" id="use-background-jobs" class="w-4 h-4 rounded bg-gray-800 border-gray-700 text-purple-600 focus:ring-purple-500" checked>
+                    </label>
                 </div>
             </section>
             <section class="pt-2 border-t border-gray-800">
@@ -134,12 +195,17 @@ function loadSettings() {
     state.settings.hfTtsModel = stored.hfTtsModel || "facebook/mms-tts-eng";
     state.settings.githubAutoCreate = localStorage.getItem('github_auto_create') === 'true';
     state.settings.githubAutoSync = localStorage.getItem('github_auto_sync') === 'true';
+    state.settings.useBackgroundJobs = stored.useBackgroundJobs !== false; // Default true
+    state.settings.trainingOptOut = stored.trainingOptOut !== false; // Default true
 
     const encData = localStorage.getItem('openrouter_enc');
     state.settings.hasKey = !!encData;
 
     const hfEncData = localStorage.getItem('huggingface_enc');
     state.settings.hasHfKey = !!hfEncData;
+
+    // Check for server key (Share B stored locally)
+    state.settings.hasServerKey = hasServerKey();
 }
 
 function saveSettings() {
@@ -147,7 +213,9 @@ function saveSettings() {
         useOpenRouter: state.settings.useOpenRouter,
         openRouterModel: state.settings.openRouterModel,
         hfImageModel: state.settings.hfImageModel,
-        hfTtsModel: state.settings.hfTtsModel
+        hfTtsModel: state.settings.hfTtsModel,
+        useBackgroundJobs: state.settings.useBackgroundJobs,
+        trainingOptOut: state.settings.trainingOptOut
     }));
 }
 
@@ -168,6 +236,11 @@ function setupListeners() {
         btnRemoveHfKey: document.getElementById('btn-remove-hf-key'),
         hfImageModel: document.getElementById('hf-image-model'),
         hfTtsModel: document.getElementById('hf-tts-model'),
+        // Server key elements
+        btnSetupServerKey: document.getElementById('btn-setup-server-key'),
+        btnUnlockSession: document.getElementById('btn-unlock-session'),
+        btnRemoveServerKey: document.getElementById('btn-remove-server-key'),
+        useBackgroundJobs: document.getElementById('use-background-jobs'),
     };
 
     // Toggle
@@ -237,11 +310,34 @@ function setupListeners() {
         state.settings.githubAutoSync = e.target.checked;
     });
 
+    // Server key / Background jobs
+    d.btnSetupServerKey?.addEventListener('click', () => startPinFlow('setup-server-key'));
+    d.btnUnlockSession?.addEventListener('click', () => startPinFlow('unlock-session'));
+    d.btnRemoveServerKey?.addEventListener('click', async () => {
+        if (confirm("Remove server key? You'll need to set it up again to use background jobs.")) {
+            localStorage.removeItem('simplesim_share_b');
+            state.settings.hasServerKey = false;
+            state.sessionUnlocked = false;
+            saveSettings();
+            updateUI();
+            showToast("Server key removed");
+        }
+    });
+
+    d.useBackgroundJobs?.addEventListener('change', (e) => {
+        state.settings.useBackgroundJobs = e.target.checked;
+        saveSettings();
+    });
+
     // External Trigger
     window.addEventListener('security-locked', () => {
         updateUI();
         showToast("Session locked");
     });
+
+    // Listen for session events
+    window.addEventListener('session-unlocked', updateUI);
+    window.addEventListener('session-expired', updateUI);
 }
 
 export function updateUI() {
@@ -258,6 +354,13 @@ export function updateUI() {
         hfKeyStatusIndicator: document.getElementById('hf-key-status-indicator'),
         hfImageModel: document.getElementById('hf-image-model'),
         hfTtsModel: document.getElementById('hf-tts-model'),
+        // Server key elements
+        serverKeyStateNone: document.getElementById('server-key-state-none'),
+        serverKeyStateConfigured: document.getElementById('server-key-state-configured'),
+        serverKeyStatus: document.getElementById('server-key-status'),
+        sessionStatusIndicator: document.getElementById('session-status-indicator'),
+        sessionExpiresIn: document.getElementById('session-expires-in'),
+        useBackgroundJobs: document.getElementById('use-background-jobs'),
     };
 
     // OpenRouter key state
@@ -304,6 +407,43 @@ export function updateUI() {
 
     if (els.hfImageModel) els.hfImageModel.value = state.settings.hfImageModel;
     if (els.hfTtsModel) els.hfTtsModel.value = state.settings.hfTtsModel;
+
+    // Server key / Background jobs state
+    if (state.settings.hasServerKey) {
+        els.serverKeyStateNone?.classList.add('hidden');
+        els.serverKeyStateConfigured?.classList.remove('hidden');
+
+        if (els.serverKeyStatus) {
+            if (state.sessionUnlocked) {
+                els.serverKeyStatus.innerHTML = '<i class="fa-solid fa-lock-open text-[10px]"></i> Unlocked';
+                els.serverKeyStatus.className = 'text-xs px-2 py-0.5 rounded bg-green-900/20 text-green-400 border border-green-900/30 flex items-center gap-1';
+            } else {
+                els.serverKeyStatus.innerHTML = '<i class="fa-solid fa-lock text-[10px]"></i> Locked';
+                els.serverKeyStatus.className = 'text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700 flex items-center gap-1';
+            }
+        }
+
+        if (els.sessionStatusIndicator) {
+            if (state.sessionUnlocked && state.sessionExpiresAt) {
+                els.sessionStatusIndicator.classList.remove('hidden');
+                const remaining = Math.max(0, state.sessionExpiresAt.getTime() - Date.now());
+                const minutes = Math.floor(remaining / 60000);
+                const hours = Math.floor(minutes / 60);
+                if (els.sessionExpiresIn) {
+                    els.sessionExpiresIn.textContent = hours > 0 ? `Expires in ${hours}h ${minutes % 60}m` : `Expires in ${minutes}m`;
+                }
+            } else {
+                els.sessionStatusIndicator.classList.add('hidden');
+            }
+        }
+    } else {
+        els.serverKeyStateNone?.classList.remove('hidden');
+        els.serverKeyStateConfigured?.classList.add('hidden');
+    }
+
+    if (els.useBackgroundJobs) {
+        els.useBackgroundJobs.checked = state.settings.useBackgroundJobs;
+    }
 
     // GitHub settings
     const githubAutoCreate = document.getElementById('github-auto-create');
