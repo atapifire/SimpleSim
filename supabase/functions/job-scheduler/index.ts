@@ -81,12 +81,13 @@ Deno.serve(async (req) => {
     console.log('Recent jobs (all statuses):', allJobs);
 
     // 3. Check for stalled processing jobs (need resumption)
+    // Lower threshold to 30 seconds since client polls every 10 seconds
+    // Check ALL job types, not just agent - simple jobs can also get stuck
     const { data: stalledJobs, error: stalledError } = await serviceClient
       .from('jobs')
       .select('id, user_id, job_type, current_iteration, last_heartbeat')
       .eq('status', 'processing')
-      .eq('job_type', 'agent')
-      .lt('last_heartbeat', new Date(Date.now() - 60000).toISOString()) // 1 min no heartbeat
+      .lt('last_heartbeat', new Date(Date.now() - 30000).toISOString()) // 30s no heartbeat
       .limit(MAX_CONCURRENT_JOBS);
 
     if (stalledError) {

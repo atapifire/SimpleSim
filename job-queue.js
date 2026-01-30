@@ -548,7 +548,8 @@ export async function triggerJobScheduler() {
 
         if (response.ok) {
             const data = await response.json();
-            devLog('Scheduler triggered:', data.processed, 'jobs processed');
+            const totalProcessed = (data.jobsStarted || 0) + (data.jobsResumed || 0);
+            devLog('Scheduler triggered:', totalProcessed, 'jobs processed (', data.pendingJobsFound, 'pending found)');
             return data;
         } else {
             // Non-critical error - scheduler might be busy or no jobs pending

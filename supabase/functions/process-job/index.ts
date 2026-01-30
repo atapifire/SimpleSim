@@ -273,6 +273,19 @@ Deno.serve(async (req) => {
     console.error('Job processing error:', error);
     console.error('Error stack:', error.stack);
 
+    // Mark the job as failed if we have a job ID
+    if (jobData?.id) {
+      try {
+        await serviceClient.rpc('fail_job', {
+          p_job_id: jobData.id,
+          p_error_message: error.message || 'Unknown error during job processing',
+        });
+        console.log(`Job ${jobData.id} marked as failed`);
+      } catch (failError) {
+        console.error('Failed to mark job as failed:', failError);
+      }
+    }
+
     return errorResponse('Job processing failed: ' + error.message, 500);
   }
 });
