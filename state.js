@@ -40,7 +40,7 @@ export const state = {
         githubAutoSync: false,
         agentMode: false, // Toggle between Agent Mode (multi-pass) and Normal Mode (single output)
         trainingOptOut: true, // COPPA/GDPR: Opt out of data training by default
-        useBackgroundJobs: true, // Use background job queue instead of synchronous generation
+        useBackgroundJobs: false, // Background jobs require cron setup - default to synchronous
     },
 
     // Background Job State

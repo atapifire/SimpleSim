@@ -528,7 +528,9 @@ async function handleSend(isRetry = false) {
 
     const currentFiles = getCurrentFiles();
 
-    // Background job mode
+    // Background job mode - use if server key is configured and setting is enabled
+    const useBackgroundMode = useServerKey && state.settings.useBackgroundJobs;
+
     if (useBackgroundMode) {
         devLog('Using BACKGROUND JOB mode');
 
