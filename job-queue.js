@@ -18,50 +18,40 @@ const STORE_KEY_URL = `${SUPABASE_URL}/functions/v1/store-api-key`;
 const UNLOCK_SESSION_URL = `${SUPABASE_URL}/functions/v1/unlock-session`;
 
 /**
- * Get a valid access token, refreshing if necessary
- * This handles the case where cached tokens are stale/expired
+ * Get access token from state, with no network calls (to avoid hanging)
  */
-async function getValidAccessToken(forceRefresh = false) {
-    // If not forcing refresh, try cached token first
-    if (!forceRefresh && state.session?.access_token) {
-        devLog('Using cached session token');
-        return state.session.access_token;
-    }
-
-    devLog('Refreshing session token...');
-
-    // Try to refresh the session
-    try {
-        const { data, error } = await supabase.auth.refreshSession();
-        if (error) {
-            devError('refreshSession error:', error.message);
-            // Fall back to getSession
-            const { data: sessionData } = await supabase.auth.getSession();
-            if (sessionData?.session?.access_token) {
-                state.session = sessionData.session;
-                devLog('Got session via getSession');
-                return sessionData.session.access_token;
-            }
-        } else if (data?.session?.access_token) {
-            state.session = data.session;
-            devLog('Session refreshed successfully');
-            return data.session.access_token;
+function getAccessToken() {
+    const token = state.session?.access_token;
+    if (token) {
+        // Log token metadata (not the actual token for security)
+        try {
+            const payload = JSON.parse(atob(token.split('.')[1]));
+            const exp = payload.exp ? new Date(payload.exp * 1000) : null;
+            const now = new Date();
+            devLog('Token info:', {
+                sub: payload.sub,
+                exp: exp?.toISOString(),
+                isExpired: exp ? now > exp : 'unknown',
+                expiresIn: exp ? Math.round((exp - now) / 1000) + 's' : 'unknown'
+            });
+        } catch (e) {
+            devLog('Could not parse token');
         }
-    } catch (e) {
-        devError('Token refresh failed:', e.message);
+        return token;
     }
-
+    devLog('No session token in state');
     return null;
 }
 
 /**
- * Make an authenticated request to an Edge Function with automatic token refresh on 401
+ * Make an authenticated request to an Edge Function
+ * If we get 401, it means the token is stale - user needs to refresh the page
  */
-async function authenticatedFetch(url, options = {}, retryOnAuth = true) {
-    let token = await getValidAccessToken(false);
+async function authenticatedFetch(url, options = {}) {
+    const token = getAccessToken();
 
     if (!token) {
-        throw new Error('Not authenticated - please refresh the page');
+        throw new Error('Not authenticated - please log in or refresh the page');
     }
 
     const response = await fetch(url, {
@@ -73,24 +63,11 @@ async function authenticatedFetch(url, options = {}, retryOnAuth = true) {
         }
     });
 
-    // If we get 401 and haven't retried, refresh token and retry once
-    if (response.status === 401 && retryOnAuth) {
-        devLog('Got 401, refreshing token and retrying...');
-        token = await getValidAccessToken(true);
-
-        if (!token) {
-            throw new Error('Session expired - please log in again');
-        }
-
-        // Retry with new token
-        return fetch(url, {
-            ...options,
-            headers: {
-                ...options.headers,
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`
-            }
-        });
+    // If we get 401, the token is invalid/expired
+    // Supabase auth methods can hang, so just tell user to refresh
+    if (response.status === 401) {
+        devError('Got 401 - token is invalid. User needs to refresh page.');
+        throw new Error('Session expired - please refresh the page and try again');
     }
 
     return response;
