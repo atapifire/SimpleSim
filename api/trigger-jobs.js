@@ -1,32 +1,27 @@
 /**
- * Vercel Cron Handler - Triggers Job Scheduler
+ * Vercel Serverless Function: Trigger Job Scheduler
  *
- * This endpoint is called by Vercel Cron every minute to process pending jobs.
+ * This endpoint can be called to process pending background jobs.
  * It invokes the Supabase Edge Function job-scheduler.
  */
 
 const SUPABASE_URL = 'https://ouvrecllkqtwbtrwyhgw.supabase.co';
 const JOB_SCHEDULER_URL = `${SUPABASE_URL}/functions/v1/job-scheduler`;
 
-export default async function handler(request) {
-    // Only allow GET (cron) or POST
-    if (request.method !== 'GET' && request.method !== 'POST') {
-        return new Response(JSON.stringify({ error: 'Method not allowed' }), {
-            status: 405,
-            headers: { 'Content-Type': 'application/json' }
-        });
+export default async function handler(req, res) {
+    // Only allow GET or POST
+    if (req.method !== 'GET' && req.method !== 'POST') {
+        return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    // Verify this is a cron request (Vercel sets this header)
-    const isVercelCron = request.headers.get('x-vercel-cron') === '1';
-    const authHeader = request.headers.get('authorization');
+    // Check for authorization
+    const authHeader = req.headers['authorization'];
+    const cronSecret = req.headers['x-cron-secret'];
 
-    // Allow if it's a Vercel cron or has valid auth
-    if (!isVercelCron && !authHeader) {
-        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
-            status: 401,
-            headers: { 'Content-Type': 'application/json' }
-        });
+    // Allow if has valid auth or matching cron secret
+    const validCronSecret = process.env.CRON_SECRET && cronSecret === process.env.CRON_SECRET;
+    if (!authHeader && !validCronSecret) {
+        return res.status(401).json({ error: 'Unauthorized' });
     }
 
     try {
@@ -35,7 +30,7 @@ export default async function handler(request) {
             'Content-Type': 'application/json'
         };
 
-        // Pass through any cron secret if configured
+        // Pass through cron secret if configured
         if (process.env.CRON_SECRET) {
             headers['x-cron-secret'] = process.env.CRON_SECRET;
         }
@@ -55,33 +50,20 @@ export default async function handler(request) {
 
         if (!response.ok) {
             console.error('Job scheduler error:', data);
-            return new Response(JSON.stringify(data), {
-                status: response.status,
-                headers: { 'Content-Type': 'application/json' }
-            });
+            return res.status(response.status).json(data);
         }
 
-        return new Response(JSON.stringify({
+        return res.status(200).json({
             success: true,
             timestamp: new Date().toISOString(),
             ...data
-        }), {
-            status: 200,
-            headers: { 'Content-Type': 'application/json' }
         });
 
     } catch (error) {
         console.error('Trigger jobs error:', error);
-        return new Response(JSON.stringify({
+        return res.status(500).json({
             error: 'Failed to trigger job scheduler',
             message: error.message
-        }), {
-            status: 500,
-            headers: { 'Content-Type': 'application/json' }
         });
     }
 }
-
-export const config = {
-    runtime: 'edge'
-};
