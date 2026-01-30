@@ -55,9 +55,10 @@ Deno.serve(async (req) => {
     results.expiredCleaned = cleanupCount || 0;
 
     // 2. Check for pending jobs
+    console.log('Checking for pending jobs...');
     const { data: pendingJobs, error: pendingError } = await serviceClient
       .from('jobs')
-      .select('id, user_id, job_type, created_at')
+      .select('id, user_id, job_type, created_at, status, expires_at')
       .eq('status', 'pending')
       .gt('expires_at', new Date().toISOString())
       .order('created_at', { ascending: true })
@@ -65,10 +66,19 @@ Deno.serve(async (req) => {
 
     if (pendingError) {
       console.error('Error fetching pending jobs:', pendingError);
-      results.errors.push('Failed to fetch pending jobs');
+      results.errors.push('Failed to fetch pending jobs: ' + pendingError.message);
     }
 
+    console.log('Pending jobs found:', pendingJobs?.length || 0, pendingJobs);
     results.pendingJobsFound = pendingJobs?.length || 0;
+
+    // Also check ALL jobs for debugging
+    const { data: allJobs } = await serviceClient
+      .from('jobs')
+      .select('id, status, expires_at, created_at')
+      .order('created_at', { ascending: false })
+      .limit(10);
+    console.log('Recent jobs (all statuses):', allJobs);
 
     // 3. Check for stalled processing jobs (need resumption)
     const { data: stalledJobs, error: stalledError } = await serviceClient
@@ -90,19 +100,35 @@ Deno.serve(async (req) => {
       ...(stalledJobs || []).map(j => ({ ...j, isResume: true })),
     ];
 
+    // Check active sessions for debugging
+    const { data: activeSessions } = await serviceClient
+      .from('active_sessions')
+      .select('user_id, expires_at')
+      .gt('expires_at', new Date().toISOString());
+    console.log('Active sessions:', activeSessions);
+
     for (const job of allJobsToProcess) {
+      console.log(`Processing job ${job.id} for user ${job.user_id}`);
+
       // Verify user has active session
-      const { data: session } = await serviceClient
+      const { data: session, error: sessionError } = await serviceClient
         .from('active_sessions')
-        .select('id')
+        .select('id, expires_at')
         .eq('user_id', job.user_id)
         .gt('expires_at', new Date().toISOString())
         .single();
 
+      if (sessionError) {
+        console.log(`Session lookup error for job ${job.id}:`, sessionError.message);
+      }
+
       if (!session) {
-        console.log(`Skipping job ${job.id} - user has no active session`);
+        console.log(`Skipping job ${job.id} - user ${job.user_id} has no active session`);
+        results.errors.push(`Job ${job.id}: No active session for user`);
         continue;
       }
+
+      console.log(`User ${job.user_id} has active session until ${session.expires_at}`);
 
       // Invoke process-job function
       try {

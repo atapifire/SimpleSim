@@ -533,6 +533,9 @@ export async function submitJob(projectId, prompt, files, options = {}) {
         throw new Error('Session not unlocked. Please enter your PIN first.');
     }
 
+    // Set job expiry to 2 hours from now (default DB is only 15 min)
+    const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+
     const jobData = {
         user_id: state.user.id,
         project_id: projectId,
@@ -541,7 +544,8 @@ export async function submitJob(projectId, prompt, files, options = {}) {
         current_files: files || [],
         model: state.settings.openRouterModel,
         training_opt_out: state.settings.trainingOptOut ?? true,
-        max_iterations: options.maxIterations || 10
+        max_iterations: options.maxIterations || 10,
+        expires_at: expiresAt
     };
 
     devLog('Submitting background job:', jobData.job_type);
