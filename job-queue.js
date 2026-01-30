@@ -238,15 +238,31 @@ async function getPasskeyDerivedKey(userId) {
 export async function storeServerKey(apiKey, options = {}) {
     devLog('storeServerKey called');
 
-    const session = await supabase.auth.getSession();
-    const accessToken = session.data.session?.access_token;
-
-    if (!accessToken) {
-        devError('No access token available');
+    // Check if user is authenticated via state first
+    if (!state.user) {
+        devError('No user in state');
         throw new Error('Not authenticated');
     }
 
-    devLog('Storing server key with sharding...');
+    devLog('User authenticated:', state.user.id);
+    devLog('Getting auth session for token...');
+
+    let accessToken;
+    try {
+        const session = await supabase.auth.getSession();
+        devLog('Session retrieved');
+        accessToken = session.data.session?.access_token;
+    } catch (e) {
+        devError('getSession failed:', e);
+        throw new Error('Failed to get auth session');
+    }
+
+    if (!accessToken) {
+        devError('No access token in session');
+        throw new Error('Not authenticated - no token');
+    }
+
+    devLog('Got access token, storing server key with sharding...');
     devLog('POST to:', STORE_KEY_URL);
 
     try {
