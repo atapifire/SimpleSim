@@ -169,7 +169,11 @@ export async function signOut() {
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
     state.user = null;
+    state.session = null; // Clear session token on logout
     state.profile = null;
+    state.sessionUnlocked = false; // Clear server key session state
+    state.serverApiKey = null;
+    state.sessionExpiresAt = null;
     events.dispatchEvent(new CustomEvent('auth-changed'));
 }
 

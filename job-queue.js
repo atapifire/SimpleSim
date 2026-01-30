@@ -246,25 +246,24 @@ export async function storeServerKey(apiKey, options = {}) {
 
     devLog('User authenticated:', state.user.id);
 
-    // Use stored session from state (avoid calling getSession which can hang)
-    const accessToken = state.session?.access_token;
-
-    if (!accessToken) {
-        devError('No access token in state.session');
-        // Fallback: try to get fresh session
-        devLog('Attempting to get fresh session...');
-        try {
-            const { data: { session } } = await supabase.auth.getSession();
-            if (session?.access_token) {
-                state.session = session;
-                devLog('Got fresh session');
-            } else {
-                throw new Error('No token in fresh session');
-            }
-        } catch (e) {
-            devError('Failed to get session:', e.message);
-            throw new Error('Not authenticated - please refresh the page');
+    // Always get a fresh session to ensure token is valid
+    // This prevents issues with stale tokens after logout/login
+    devLog('Getting fresh session...');
+    try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error) {
+            devError('getSession error:', error.message);
+            throw new Error('Failed to get session: ' + error.message);
         }
+        if (session?.access_token) {
+            state.session = session;
+            devLog('Got fresh session, token expires:', session.expires_at);
+        } else {
+            throw new Error('No valid session');
+        }
+    } catch (e) {
+        devError('Failed to get session:', e.message);
+        throw new Error('Not authenticated - please refresh the page');
     }
 
     const token = state.session?.access_token;
@@ -355,9 +354,26 @@ export async function retrieveShareB(pin) {
 export async function unlockSession(pin, options = {}) {
     devLog('unlockSession called');
 
-    // Use stored session from state
-    const accessToken = state.session?.access_token;
+    // Always get a fresh session to ensure token is valid
+    devLog('Getting fresh session for unlock...');
+    try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error) {
+            devError('getSession error:', error.message);
+            throw new Error('Failed to get session: ' + error.message);
+        }
+        if (session?.access_token) {
+            state.session = session;
+            devLog('Got fresh session');
+        } else {
+            throw new Error('No valid session');
+        }
+    } catch (e) {
+        devError('Failed to get session:', e.message);
+        throw new Error('Not authenticated - please refresh the page');
+    }
 
+    const accessToken = state.session?.access_token;
     if (!accessToken) {
         devError('No access token for unlock');
         throw new Error('Not authenticated - please refresh the page');
