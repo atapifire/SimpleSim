@@ -11,6 +11,7 @@ export const state = {
     // Auth state
     user: null,
     profile: null,
+    session: null, // Store full session with access_token
     isAuthLoading: true,
 
     // Project state
@@ -178,6 +179,7 @@ export async function initAuth() {
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.user) {
         state.user = session.user;
+        state.session = session; // Store full session for access_token
         // Load profile and save GitHub token if available
         await loadAndUpdateProfile(session);
     }
@@ -191,9 +193,11 @@ export async function initAuth() {
 
         if (session?.user) {
             state.user = session.user;
+            state.session = session; // Store full session for access_token
             await loadAndUpdateProfile(session);
         } else {
             state.user = null;
+            state.session = null;
             state.profile = null;
         }
         events.dispatchEvent(new CustomEvent('auth-changed'));

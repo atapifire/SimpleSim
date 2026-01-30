@@ -245,21 +245,31 @@ export async function storeServerKey(apiKey, options = {}) {
     }
 
     devLog('User authenticated:', state.user.id);
-    devLog('Getting auth session for token...');
 
-    let accessToken;
-    try {
-        const session = await supabase.auth.getSession();
-        devLog('Session retrieved');
-        accessToken = session.data.session?.access_token;
-    } catch (e) {
-        devError('getSession failed:', e);
-        throw new Error('Failed to get auth session');
-    }
+    // Use stored session from state (avoid calling getSession which can hang)
+    const accessToken = state.session?.access_token;
 
     if (!accessToken) {
-        devError('No access token in session');
-        throw new Error('Not authenticated - no token');
+        devError('No access token in state.session');
+        // Fallback: try to get fresh session
+        devLog('Attempting to get fresh session...');
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (session?.access_token) {
+                state.session = session;
+                devLog('Got fresh session');
+            } else {
+                throw new Error('No token in fresh session');
+            }
+        } catch (e) {
+            devError('Failed to get session:', e.message);
+            throw new Error('Not authenticated - please refresh the page');
+        }
+    }
+
+    const token = state.session?.access_token;
+    if (!token) {
+        throw new Error('Authentication failed - no token available');
     }
 
     devLog('Got access token, storing server key with sharding...');
@@ -270,7 +280,7 @@ export async function storeServerKey(apiKey, options = {}) {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
+                'Authorization': `Bearer ${token}`
             },
             body: JSON.stringify({
                 apiKey,
@@ -343,11 +353,11 @@ export async function retrieveShareB(pin) {
  * Unlock session - combine shares and create active session
  */
 export async function unlockSession(pin, options = {}) {
-    const session = await supabase.auth.getSession();
-    const accessToken = session.data.session?.access_token;
+    // Use stored session from state
+    const accessToken = state.session?.access_token;
 
     if (!accessToken) {
-        throw new Error('Not authenticated');
+        throw new Error('Not authenticated - please refresh the page');
     }
 
     devLog('Unlocking session...');
