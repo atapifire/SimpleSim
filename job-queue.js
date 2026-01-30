@@ -236,42 +236,55 @@ async function getPasskeyDerivedKey(userId) {
  * Returns Share B for local storage
  */
 export async function storeServerKey(apiKey, options = {}) {
+    devLog('storeServerKey called');
+
     const session = await supabase.auth.getSession();
     const accessToken = session.data.session?.access_token;
 
     if (!accessToken) {
+        devError('No access token available');
         throw new Error('Not authenticated');
     }
 
     devLog('Storing server key with sharding...');
+    devLog('POST to:', STORE_KEY_URL);
 
-    const response = await fetch(STORE_KEY_URL, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`
-        },
-        body: JSON.stringify({
-            apiKey,
-            provider: options.provider || 'openrouter',
-            label: options.label || 'Default Key',
-            trainingOptOut: options.trainingOptOut ?? true,
-            minAgeRequirement: options.minAgeRequirement || 0
-        })
-    });
+    try {
+        const response = await fetch(STORE_KEY_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify({
+                apiKey,
+                provider: options.provider || 'openrouter',
+                label: options.label || 'Default Key',
+                trainingOptOut: options.trainingOptOut ?? true,
+                minAgeRequirement: options.minAgeRequirement || 0
+            })
+        });
 
-    const data = await response.json();
+        devLog('Response status:', response.status);
 
-    if (!response.ok) {
-        throw new Error(data.error || 'Failed to store key');
+        const data = await response.json();
+        devLog('Response data:', data);
+
+        if (!response.ok) {
+            devError('Server returned error:', data);
+            throw new Error(data.error || `Server error: ${response.status}`);
+        }
+
+        devLog('Server key stored, received Share B');
+
+        return {
+            keyId: data.keyId,
+            shareB: data.shareB // Base64 encoded
+        };
+    } catch (e) {
+        devError('storeServerKey fetch failed:', e);
+        throw e;
     }
-
-    devLog('Server key stored, received Share B');
-
-    return {
-        keyId: data.keyId,
-        shareB: data.shareB // Base64 encoded
-    };
 }
 
 /**
@@ -366,21 +379,35 @@ export async function unlockSession(pin, options = {}) {
 export async function checkSessionStatus() {
     if (!state.user) return false;
 
-    const { data: session } = await supabase
-        .from('active_sessions')
-        .select('expires_at')
-        .eq('user_id', state.user.id)
-        .gt('expires_at', new Date().toISOString())
-        .single();
+    try {
+        const { data: sessions, error } = await supabase
+            .from('active_sessions')
+            .select('expires_at')
+            .eq('user_id', state.user.id)
+            .gt('expires_at', new Date().toISOString())
+            .limit(1);
 
-    const isActive = !!session;
-    state.sessionUnlocked = isActive;
+        // Handle errors gracefully (table might not exist yet, etc.)
+        if (error) {
+            devLog('Session check error (expected if table not set up):', error.message);
+            state.sessionUnlocked = false;
+            return false;
+        }
 
-    if (session) {
-        state.sessionExpiresAt = new Date(session.expires_at);
+        const session = sessions?.[0];
+        const isActive = !!session;
+        state.sessionUnlocked = isActive;
+
+        if (session) {
+            state.sessionExpiresAt = new Date(session.expires_at);
+        }
+
+        return isActive;
+    } catch (e) {
+        devLog('Session check failed:', e.message);
+        state.sessionUnlocked = false;
+        return false;
     }
-
-    return isActive;
 }
 
 /**

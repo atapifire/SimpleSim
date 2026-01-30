@@ -161,18 +161,25 @@ async function handlePinConfirm() {
         const apiKey = document.getElementById('input-api-key').value.trim();
         const pin = document.getElementById('input-pin-setup').value.trim();
 
+        console.log('[Background Jobs] Starting server key setup...');
+
         if (!apiKey.startsWith('sk-or-')) return showPinError("Invalid Key (must start with sk-or-)");
         if (pin.length < 8) return showPinError("PIN must be 8+ digits for server keys");
 
         try {
             setLoading(true, "Setting up zero-knowledge key storage...");
+            console.log('[Background Jobs] Calling storeServerKey...');
 
             // 1. Send to server - receives Share B back
-            const { shareB, keyId } = await storeServerKey(apiKey, {
+            const result = await storeServerKey(apiKey, {
                 trainingOptOut: state.settings.trainingOptOut
             });
+            console.log('[Background Jobs] storeServerKey result:', result);
+
+            const { shareB, keyId } = result;
 
             // 2. Encrypt Share B locally with PIN
+            console.log('[Background Jobs] Storing Share B locally...');
             await storeShareBLocally(shareB, pin);
 
             state.settings.hasServerKey = true;
@@ -184,15 +191,17 @@ async function handlePinConfirm() {
 
             // Automatically unlock the session
             try {
+                console.log('[Background Jobs] Auto-unlocking session...');
                 await unlockSession(pin);
                 showToast("Session unlocked for 2 hours");
             } catch (e) {
-                console.error("Auto-unlock failed:", e);
+                console.error("[Background Jobs] Auto-unlock failed:", e);
             }
 
         } catch (e) {
             setLoading(false);
-            console.error("Server key setup failed:", e);
+            console.error("[Background Jobs] Server key setup failed:", e);
+            console.error("[Background Jobs] Error details:", e.stack || e);
             showPinError(e.message || "Failed to setup server key");
         }
 
