@@ -403,15 +403,45 @@ async function runSimpleGeneration(
 
   messages.push({ role: 'user', content: jobData.prompt });
 
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model: jobData.model,
-      messages,
-      stream: false,
-    }),
-  });
+  // Retry logic for transient errors
+  let response: Response | null = null;
+  let lastError = '';
+  const maxRetries = 3;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model: jobData.model,
+          messages,
+          stream: false,
+        }),
+      });
+
+      // Retry on transient errors
+      if (response.status === 429 || response.status >= 500) {
+        const errorBody = await response.text();
+        lastError = `HTTP ${response.status}: ${errorBody}`;
+        console.warn(`[simple] Transient error, retrying in ${attempt}s...`);
+        await new Promise(r => setTimeout(r, attempt * 1000));
+        continue;
+      }
+
+      break; // Success or non-retryable error
+    } catch (fetchError) {
+      lastError = fetchError.message;
+      if (attempt < maxRetries) {
+        console.warn(`[simple] Fetch error, retrying: ${fetchError.message}`);
+        await new Promise(r => setTimeout(r, attempt * 1000));
+      }
+    }
+  }
+
+  if (!response) {
+    throw new Error(`All ${maxRetries} retries failed: ${lastError}`);
+  }
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
@@ -505,14 +535,44 @@ async function runAgentGeneration(
       console.log(`[process-job] Calling OpenRouter with model: ${jobData.model}`);
       console.log(`[process-job] Message count: ${messages.length}`);
 
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(AGENT_ITERATION_TIMEOUT_MS),
-      });
+      // Retry logic for transient errors
+      let response: Response | null = null;
+      let lastError = '';
+      const maxRetries = 3;
 
-      console.log(`[process-job] OpenRouter response status: ${response.status}`);
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(requestBody),
+            signal: AbortSignal.timeout(AGENT_ITERATION_TIMEOUT_MS),
+          });
+
+          console.log(`[process-job] OpenRouter response status: ${response.status} (attempt ${attempt})`);
+
+          // Retry on transient errors
+          if (response.status === 429 || response.status >= 500) {
+            const errorBody = await response.text();
+            lastError = `HTTP ${response.status}: ${errorBody}`;
+            console.warn(`[process-job] Transient error, retrying in ${attempt}s...`);
+            await new Promise(r => setTimeout(r, attempt * 1000));
+            continue;
+          }
+
+          break; // Success or non-retryable error
+        } catch (fetchError) {
+          lastError = fetchError.message;
+          if (attempt < maxRetries) {
+            console.warn(`[process-job] Fetch error, retrying: ${fetchError.message}`);
+            await new Promise(r => setTimeout(r, attempt * 1000));
+          }
+        }
+      }
+
+      if (!response) {
+        throw new Error(`All ${maxRetries} retries failed: ${lastError}`);
+      }
 
       if (!response.ok) {
         const errorBody = await response.text();
