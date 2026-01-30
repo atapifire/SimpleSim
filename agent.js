@@ -440,7 +440,8 @@ export async function runAgent(prompt, currentFiles) {
 const RETRY_CONFIG = {
     maxRetries: 2,
     retryDelay: 1000,
-    retryableStatuses: [404, 429, 500, 502, 503, 504]
+    retryableStatuses: [429, 500, 502, 503, 504], // NOT 404 - often means model/config issue
+    nonRetryableMessages: ['data policy', 'privacy', 'not found', 'does not exist']
 };
 
 /**
@@ -479,17 +480,25 @@ async function callOpenRouterWithTools(messages, key, retryCount = 0) {
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));
             const errorMsg = err.error?.message || response.statusText || `HTTP ${response.status}`;
+            const lowerErrorMsg = errorMsg.toLowerCase();
             devError('Agent API error:', response.status, errorMsg);
 
+            // Check if error message indicates non-retryable issue
+            const isNonRetryable = RETRY_CONFIG.nonRetryableMessages.some(msg => lowerErrorMsg.includes(msg));
+
             // Check if retryable
-            if (RETRY_CONFIG.retryableStatuses.includes(response.status) && retryCount < RETRY_CONFIG.maxRetries) {
-                const errorType = response.status === 404 ? 'Provider unavailable' :
-                                  response.status === 429 ? 'Rate limited' : 'Server error';
+            if (!isNonRetryable && RETRY_CONFIG.retryableStatuses.includes(response.status) && retryCount < RETRY_CONFIG.maxRetries) {
+                const errorType = response.status === 429 ? 'Rate limited' : 'Server error';
                 thinking.log('warning', `${errorType}, retrying...`);
                 devLog(`Retrying agent call after ${response.status} error...`);
 
                 await new Promise(r => setTimeout(r, RETRY_CONFIG.retryDelay));
                 return callOpenRouterWithTools(messages, key, retryCount + 1);
+            }
+
+            // Provide helpful message for data policy errors
+            if (lowerErrorMsg.includes('data policy') || lowerErrorMsg.includes('privacy')) {
+                throw new Error(`OpenRouter requires privacy settings. Visit: https://openrouter.ai/settings/privacy`);
             }
 
             throw new Error(`API Error: ${errorMsg}`);

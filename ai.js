@@ -283,7 +283,9 @@ function mergeFiles(existingFiles, newFiles) {
 const RETRY_CONFIG = {
     maxRetries: 2,
     retryDelay: 1000, // 1 second
-    retryableStatuses: [404, 429, 500, 502, 503, 504] // Provider errors, rate limits, server errors
+    retryableStatuses: [429, 500, 502, 503, 504], // Rate limits, server errors (NOT 404)
+    // 404 with "data policy" message is a user config issue, not transient
+    nonRetryableMessages: ['data policy', 'privacy', 'not found']
 };
 
 /**
@@ -343,10 +345,15 @@ async function generateWithOpenRouter(messages, retryCount = 0) {
             const err = await response.json().catch(() => ({}));
             devError('API Error:', response.status, err);
 
+            const errorMsg = err.error?.message || response.statusText || `HTTP ${response.status}`;
+            const lowerErrorMsg = errorMsg.toLowerCase();
+
+            // Check if error message indicates non-retryable issue
+            const isNonRetryable = RETRY_CONFIG.nonRetryableMessages.some(msg => lowerErrorMsg.includes(msg));
+
             // Check if this is a retryable error
-            if (RETRY_CONFIG.retryableStatuses.includes(response.status) && retryCount < RETRY_CONFIG.maxRetries) {
-                const errorType = response.status === 404 ? 'Provider unavailable' :
-                                  response.status === 429 ? 'Rate limited' : 'Server error';
+            if (!isNonRetryable && RETRY_CONFIG.retryableStatuses.includes(response.status) && retryCount < RETRY_CONFIG.maxRetries) {
+                const errorType = response.status === 429 ? 'Rate limited' : 'Server error';
                 thinking.setStatus('thinking', `${errorType}, retrying in ${RETRY_CONFIG.retryDelay/1000}s...`);
                 thinking.log('warning', `${errorType} (${response.status}), retry ${retryCount + 1}/${RETRY_CONFIG.maxRetries}`);
                 devLog(`Retrying after ${response.status} error...`);
@@ -355,8 +362,13 @@ async function generateWithOpenRouter(messages, retryCount = 0) {
                 return generateWithOpenRouter(messages, retryCount + 1);
             }
 
+            // Provide helpful message for data policy errors
+            if (lowerErrorMsg.includes('data policy') || lowerErrorMsg.includes('privacy')) {
+                thinking.setStatus('error', 'Configure OpenRouter privacy settings');
+                throw new Error(`OpenRouter requires privacy settings configuration. Visit: https://openrouter.ai/settings/privacy`);
+            }
+
             // Non-retryable or max retries exceeded
-            const errorMsg = err.error?.message || response.statusText || `HTTP ${response.status}`;
             thinking.setStatus('error', `API Error: ${errorMsg}`);
             throw new Error(`OpenRouter Error: ${errorMsg}`);
         }
@@ -588,7 +600,43 @@ function parseAIResponse(content) {
         devLog('JSON fix attempt failed');
     }
 
-    // Strategy 6: Try to extract files array directly and construct response
+    // Strategy 6: Try to extract individual complete file objects (handles truncated responses)
+    try {
+        const files = [];
+        // Match complete file objects: {"path": "...", "content": "..."}
+        const filePattern = /\{\s*"path"\s*:\s*"([^"]+)"\s*,\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"\s*(?:,\s*"action"\s*:\s*"([^"]+)")?\s*\}/g;
+        let match;
+
+        while ((match = filePattern.exec(content)) !== null) {
+            const path = match[1];
+            // Unescape the content string
+            let fileContent = match[2];
+            try {
+                fileContent = JSON.parse(`"${fileContent}"`);
+            } catch (e) {
+                // Use as-is if unescaping fails
+                fileContent = fileContent.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"');
+            }
+
+            files.push({
+                path: path,
+                content: fileContent,
+                action: match[3] || 'modify'
+            });
+        }
+
+        if (files.length > 0) {
+            devLog('Extracted', files.length, 'complete file(s) from truncated response');
+            return {
+                files: files,
+                description: 'Generated content (partial response recovered)'
+            };
+        }
+    } catch (e) {
+        devLog('File object extraction failed:', e.message);
+    }
+
+    // Strategy 7: Try to extract files array directly
     try {
         const filesArrayMatch = content.match(/\[\s*\{[\s\S]*?"path"\s*:/);
         if (filesArrayMatch) {
