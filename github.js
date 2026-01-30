@@ -139,7 +139,8 @@ export async function autoCreateRepoIfEnabled(projectId, projectName) {
 }
 
 /**
- * Auto-commit to GitHub after version creation if repo exists
+ * Auto-commit to GitHub after version creation
+ * If auto-sync is enabled and no repo exists, create one first
  */
 export async function autoCommitIfLinked(projectId, files, prompt) {
     const autoSync = localStorage.getItem('github_auto_sync') === 'true';
@@ -153,7 +154,7 @@ export async function autoCommitIfLinked(projectId, files, prompt) {
     // Check if project has a GitHub repo
     const { data: project, error } = await supabase
         .from('projects')
-        .select('github_repo')
+        .select('github_repo, name')
         .eq('id', projectId)
         .single();
 
@@ -162,12 +163,30 @@ export async function autoCommitIfLinked(projectId, files, prompt) {
         return null;
     }
 
-    if (!project?.github_repo) {
-        devLog('Project not linked to GitHub, skipping auto-commit');
-        return null;
+    let repoName = project?.github_repo;
+
+    // If no repo exists but auto-sync is enabled, create one
+    if (!repoName) {
+        devLog('No GitHub repo linked, creating one...');
+        try {
+            const projectName = project?.name || `simplesim-project-${projectId.slice(0, 8)}`;
+            const repoResult = await createGitHubRepo(projectId, projectName);
+            if (repoResult?.full_name) {
+                repoName = repoResult.full_name;
+                showToast(`GitHub repo created: ${repoName}`);
+                devLog('GitHub repo created:', repoName);
+            } else {
+                devError('Failed to create GitHub repo - no result');
+                return null;
+            }
+        } catch (createError) {
+            devError('Failed to create GitHub repo:', createError);
+            showToast(`GitHub repo creation failed: ${createError.message}`);
+            return null;
+        }
     }
 
-    devLog('Project linked to GitHub:', project.github_repo);
+    devLog('Project linked to GitHub:', repoName);
 
     try {
         const githubFiles = convertFilesForGitHub(files);
