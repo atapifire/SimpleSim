@@ -117,7 +117,8 @@ async function authenticatedFetch(url, options = {}) {
         let serverError = null;
         try {
             const errorBody = await response.clone().json();
-            serverError = errorBody.error;
+            // Handle both our format {error} and Supabase gateway format {code, message}
+            serverError = errorBody.error || errorBody.message || JSON.stringify(errorBody);
             devError('Server 401 error:', serverError);
         } catch (e) {
             devError('Could not parse 401 response body:', e.message);
