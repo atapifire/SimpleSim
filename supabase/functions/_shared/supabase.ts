@@ -46,16 +46,24 @@ export async function getUserIdFromToken(authHeader: string): Promise<string | n
 }
 
 /**
- * Verify the request is authenticated
+ * Auth verification result with error details
  */
-export async function verifyAuth(req: Request): Promise<{
-  userId: string;
-  supabase: SupabaseClient;
-} | null> {
+export interface AuthResult {
+  success: boolean;
+  userId?: string;
+  supabase?: SupabaseClient;
+  error?: string;
+  errorCode?: string;
+}
+
+/**
+ * Verify the request is authenticated (returns detailed error info)
+ */
+export async function verifyAuthWithDetails(req: Request): Promise<AuthResult> {
   const authHeader = req.headers.get('Authorization');
   if (!authHeader) {
     console.log('[verifyAuth] No Authorization header');
-    return null;
+    return { success: false, error: 'No Authorization header', errorCode: 'NO_AUTH_HEADER' };
   }
 
   console.log('[verifyAuth] Auth header present, length:', authHeader.length);
@@ -63,33 +71,58 @@ export async function verifyAuth(req: Request): Promise<{
   const userId = await getUserIdFromToken(authHeader);
   if (!userId) {
     console.log('[verifyAuth] Could not extract userId from token');
-    return null;
+    return { success: false, error: 'Invalid token format - could not extract user ID', errorCode: 'INVALID_TOKEN_FORMAT' };
   }
 
   console.log('[verifyAuth] Extracted userId:', userId);
 
   // Check environment variables
-  console.log('[verifyAuth] SUPABASE_URL:', SUPABASE_URL ? 'set' : 'NOT SET');
-  console.log('[verifyAuth] SUPABASE_ANON_KEY:', SUPABASE_ANON_KEY ? 'set (length: ' + SUPABASE_ANON_KEY?.length + ')' : 'NOT SET');
+  const urlSet = !!SUPABASE_URL;
+  const keySet = !!SUPABASE_ANON_KEY;
+  console.log('[verifyAuth] SUPABASE_URL:', urlSet ? 'set' : 'NOT SET');
+  console.log('[verifyAuth] SUPABASE_ANON_KEY:', keySet ? 'set (length: ' + SUPABASE_ANON_KEY?.length + ')' : 'NOT SET');
+
+  if (!urlSet || !keySet) {
+    return { success: false, error: 'Server configuration error - missing Supabase credentials', errorCode: 'MISSING_ENV' };
+  }
 
   const supabase = createUserClient(authHeader);
 
   // Verify the token is valid by checking the user
   console.log('[verifyAuth] Calling getUser()...');
-  const { data: { user }, error } = await supabase.auth.getUser();
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser();
 
-  if (error) {
-    console.error('[verifyAuth] getUser error:', error.message, error);
-    return null;
+    if (error) {
+      console.error('[verifyAuth] getUser error:', error.message, error);
+      return { success: false, error: `Token validation failed: ${error.message}`, errorCode: 'TOKEN_VALIDATION_FAILED' };
+    }
+
+    if (!user) {
+      console.log('[verifyAuth] getUser returned no user');
+      return { success: false, error: 'Token valid but user not found', errorCode: 'USER_NOT_FOUND' };
+    }
+
+    console.log('[verifyAuth] Verified user:', user.id);
+    return { success: true, userId: user.id, supabase };
+  } catch (e) {
+    console.error('[verifyAuth] Exception during getUser:', e);
+    return { success: false, error: `Exception during token validation: ${e.message}`, errorCode: 'EXCEPTION' };
   }
+}
 
-  if (!user) {
-    console.log('[verifyAuth] getUser returned no user');
-    return null;
+/**
+ * Verify the request is authenticated (legacy function for compatibility)
+ */
+export async function verifyAuth(req: Request): Promise<{
+  userId: string;
+  supabase: SupabaseClient;
+} | null> {
+  const result = await verifyAuthWithDetails(req);
+  if (result.success && result.userId && result.supabase) {
+    return { userId: result.userId, supabase: result.supabase };
   }
-
-  console.log('[verifyAuth] Verified user:', user.id);
-  return { userId: user.id, supabase };
+  return null;
 }
 
 /**

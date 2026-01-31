@@ -19,7 +19,7 @@ import {
   fromHex,
 } from '../_shared/crypto.ts';
 import {
-  verifyAuth,
+  verifyAuthWithDetails,
   createServiceClient,
   handleCors,
   jsonResponse,
@@ -39,10 +39,11 @@ Deno.serve(async (req) => {
     return errorResponse('Method not allowed', 405);
   }
 
-  // Verify authentication
-  const auth = await verifyAuth(req);
-  if (!auth) {
-    return errorResponse('Unauthorized', 401);
+  // Verify authentication with detailed error reporting
+  const auth = await verifyAuthWithDetails(req);
+  if (!auth.success) {
+    console.error('[store-api-key] Auth failed:', auth.errorCode, auth.error);
+    return errorResponse(`Unauthorized: ${auth.error} (${auth.errorCode})`, 401);
   }
 
   // Check server pepper is configured

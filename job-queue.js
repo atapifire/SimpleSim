@@ -137,9 +137,18 @@ async function authenticatedFetch(url, options = {}) {
             devError('Session refresh failed:', e.message);
         }
 
-        // If still 401, give up
+        // If still 401, try to get the detailed error message from the response
         if (response.status === 401) {
             devError('Still 401 after refresh - token is invalid');
+            try {
+                const errorBody = await response.clone().json();
+                if (errorBody.error) {
+                    devError('Server auth error:', errorBody.error);
+                    throw new Error(`Auth failed: ${errorBody.error}`);
+                }
+            } catch (parseError) {
+                // Ignore JSON parse errors
+            }
             throw new Error('Session expired - please refresh the page and try again');
         }
     }
