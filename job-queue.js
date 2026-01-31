@@ -589,6 +589,9 @@ export async function submitJob(projectId, prompt, files, options = {}) {
 
     devLog('Job submitted:', job.id);
 
+    // Remember this project as the last one with a job queued
+    localStorage.setItem('last_job_project_id', projectId);
+
     // Update state
     state.currentJob = job;
     events.dispatchEvent(new CustomEvent('job-submitted', { detail: job }));
@@ -700,6 +703,40 @@ export async function getPendingJobs() {
     }
 
     return jobs || [];
+}
+
+/**
+ * Get set of project IDs that have active jobs
+ */
+export async function getActiveJobProjectIds() {
+    if (!state.user) return new Set();
+
+    const { data: jobs, error } = await supabase
+        .from('jobs')
+        .select('project_id')
+        .eq('user_id', state.user.id)
+        .in('status', ['pending', 'processing']);
+
+    if (error) {
+        devError('Failed to get active job projects:', error);
+        return new Set();
+    }
+
+    return new Set((jobs || []).map(j => j.project_id));
+}
+
+/**
+ * Get last project ID that had a job queued
+ */
+export function getLastJobProjectId() {
+    return localStorage.getItem('last_job_project_id');
+}
+
+/**
+ * Clear last job project ID (call when job completes)
+ */
+export function clearLastJobProjectId() {
+    localStorage.removeItem('last_job_project_id');
 }
 
 /**

@@ -3,6 +3,10 @@ import { renderProject } from './renderer.js';
 import { showToast } from './utils.js';
 import { autoCreateRepoIfEnabled, autoCommitIfLinked } from './github.js';
 import { devLog, devError } from './thinking.js';
+import { getActiveJobProjectIds } from './job-queue.js';
+
+// Track which projects have active jobs (updated periodically)
+let activeJobProjects = new Set();
 
 const PROJECT_MENU_HTML = `
 <div id="project-menu" class="absolute bottom-full left-0 mb-3 ml-2 w-64 bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-xl shadow-2xl transform origin-bottom-left transition-all duration-200 opacity-0 pointer-events-none translate-y-2 z-50 flex flex-col">
@@ -31,6 +35,22 @@ export function initProjects() {
             renderProjectList();
             resetToNewProject();
         }
+    });
+
+    // Listen for job events to update project list indicators
+    events.addEventListener('job-submitted', () => {
+        // Re-render to show the new job indicator
+        renderProjectList();
+    });
+
+    events.addEventListener('job-completed', () => {
+        // Re-render to remove the job indicator
+        renderProjectList();
+    });
+
+    events.addEventListener('job-failed', () => {
+        // Re-render to remove the job indicator
+        renderProjectList();
     });
 
     // Initial load if already authenticated
@@ -367,7 +387,7 @@ export function getCurrentFiles() {
     return state.versions[state.currentVersionIndex].files;
 }
 
-function renderProjectList(filterText = '') {
+async function renderProjectList(filterText = '') {
     const list = document.getElementById('project-list');
     if (!list) return;
     list.innerHTML = '';
@@ -376,6 +396,9 @@ function renderProjectList(filterText = '') {
         list.innerHTML = '<div class="text-gray-500 text-xs text-center py-4">Sign in to see projects</div>';
         return;
     }
+
+    // Refresh active job projects
+    activeJobProjects = await getActiveJobProjectIds();
 
     const filtered = state.projects.filter(p => p.name.toLowerCase().includes(filterText.toLowerCase()));
 
@@ -386,9 +409,22 @@ function renderProjectList(filterText = '') {
 
     filtered.forEach(p => {
         const isActive = p.id === state.projectId;
+        const hasActiveJob = activeJobProjects.has(p.id);
         const el = document.createElement('div');
         el.className = `p-2 rounded-lg cursor-pointer flex justify-between items-center group transition-colors ${isActive ? 'bg-blue-900/30 text-blue-200' : 'hover:bg-gray-800 text-gray-300'}`;
-        el.innerHTML = `<div class="truncate text-xs font-medium pr-2">${p.name}</div><div class="text-[10px] text-gray-500 font-mono opacity-0 group-hover:opacity-100 transition-opacity">${new Date(p.created_at).toLocaleDateString()}</div>`;
+
+        // Build the project name with optional job indicator
+        const jobIndicator = hasActiveJob
+            ? '<span class="inline-flex items-center ml-1.5"><span class="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" title="Job running"></span></span>'
+            : '';
+
+        el.innerHTML = `
+            <div class="truncate text-xs font-medium pr-2 flex items-center">
+                ${p.name}${jobIndicator}
+            </div>
+            <div class="text-[10px] text-gray-500 font-mono opacity-0 group-hover:opacity-100 transition-opacity">
+                ${new Date(p.created_at).toLocaleDateString()}
+            </div>`;
         el.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();

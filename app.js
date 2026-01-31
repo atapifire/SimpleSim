@@ -14,6 +14,9 @@ import {
     cancelJob,
     checkCompletedJobs,
     getPendingJobs,
+    getActiveJobProjectIds,
+    getLastJobProjectId,
+    clearLastJobProjectId,
     hasServerKey,
     checkSessionStatus,
     unlockSession,
@@ -401,6 +404,14 @@ async function checkForPendingJobs() {
             // Subscribe to the most recent job
             const latestJob = pendingJobs[0];
             state.currentJob = latestJob;
+
+            // If the job is for a different project, switch to that project
+            if (latestJob.project_id && latestJob.project_id !== state.projectId) {
+                devLog('Active job found for different project, switching to:', latestJob.project_id);
+                await loadProject(latestJob.project_id);
+                showToast('Switched to project with active job');
+            }
+
             showJobProgress(latestJob);
 
             // Subscribe to updates
@@ -422,11 +433,15 @@ async function checkForPendingJobs() {
                     devLog('Background job completed:', result);
                     hideJobProgress();
                     state.currentJob = null;
+                    clearLastJobProjectId(); // Clear the remembered project
 
                     // Reload project to show new version
                     if (state.projectId) {
                         await loadProject(state.projectId, true);
                     }
+
+                    // Notify project list to update indicators
+                    events.dispatchEvent(new CustomEvent('job-completed', { detail: result }));
 
                     const modeLabel = result.iterations > 1
                         ? `Agent completed in ${result.iterations} iterations`
@@ -437,6 +452,11 @@ async function checkForPendingJobs() {
                     devError('Background job failed:', error);
                     hideJobProgress();
                     state.currentJob = null;
+                    clearLastJobProjectId(); // Clear the remembered project
+
+                    // Notify project list to update indicators
+                    events.dispatchEvent(new CustomEvent('job-failed', { detail: error }));
+
                     showToast('Job failed: ' + error.message);
                 }
             });
@@ -561,6 +581,7 @@ async function handleSend(isRetry = false) {
                     devLog('Background job completed:', result);
                     hideJobProgress();
                     state.currentJob = null;
+                    clearLastJobProjectId(); // Clear the remembered project
                     if (state.jobSubscription) {
                         state.jobSubscription();
                         state.jobSubscription = null;
@@ -568,6 +589,9 @@ async function handleSend(isRetry = false) {
 
                     // Reload project to show new version
                     await loadProject(state.projectId, true);
+
+                    // Notify project list to update indicators
+                    events.dispatchEvent(new CustomEvent('job-completed', { detail: result }));
 
                     const modeLabel = result.iterations > 1
                         ? `Agent completed in ${result.iterations} iterations`
@@ -578,10 +602,15 @@ async function handleSend(isRetry = false) {
                     devError('Background job failed:', error);
                     hideJobProgress();
                     state.currentJob = null;
+                    clearLastJobProjectId(); // Clear the remembered project
                     if (state.jobSubscription) {
                         state.jobSubscription();
                         state.jobSubscription = null;
                     }
+
+                    // Notify project list to update indicators
+                    events.dispatchEvent(new CustomEvent('job-failed', { detail: error }));
+
                     showToast('Job failed: ' + error.message);
                 }
             });
