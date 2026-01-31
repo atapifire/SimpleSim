@@ -96,6 +96,9 @@ async function authenticatedFetch(url, options = {}) {
         throw new Error('Not authenticated - please log in or refresh the page');
     }
 
+    devLog('Making authenticated request to:', url);
+    devLog('Token preview:', token.substring(0, 50) + '...');
+
     let response = await fetch(url, {
         ...options,
         headers: {
@@ -105,8 +108,20 @@ async function authenticatedFetch(url, options = {}) {
         }
     });
 
-    // If we get 401, try once more with a completely fresh session
+    devLog('Response status:', response.status);
+
+    // If we get 401, try to get the detailed error first
     if (response.status === 401) {
+        // Clone and read error body BEFORE any retry attempts
+        let serverError = null;
+        try {
+            const errorBody = await response.clone().json();
+            serverError = errorBody.error;
+            devError('Server 401 error:', serverError);
+        } catch (e) {
+            devError('Could not parse 401 response body:', e.message);
+        }
+
         devLog('Got 401, forcing session refresh...');
 
         try {
@@ -118,10 +133,14 @@ async function authenticatedFetch(url, options = {}) {
                 )
             ]);
 
+            if (error) {
+                devError('refreshSession returned error:', error.message);
+            }
+
             if (!error && session?.access_token) {
                 state.session = session;
                 token = session.access_token;
-                devLog('Session refreshed, retrying request');
+                devLog('Session refreshed successfully, new token preview:', token.substring(0, 50) + '...');
 
                 // Retry the request with new token
                 response = await fetch(url, {
@@ -132,28 +151,116 @@ async function authenticatedFetch(url, options = {}) {
                         'Authorization': `Bearer ${token}`
                     }
                 });
+
+                devLog('Retry response status:', response.status);
+
+                // Check if retry also failed
+                if (response.status === 401) {
+                    try {
+                        const retryErrorBody = await response.clone().json();
+                        serverError = retryErrorBody.error;
+                        devError('Retry 401 error:', serverError);
+                    } catch (e) {
+                        devError('Could not parse retry 401 response:', e.message);
+                    }
+                }
+            } else {
+                devLog('Session refresh did not return valid session');
             }
         } catch (e) {
             devError('Session refresh failed:', e.message);
         }
 
-        // If still 401, try to get the detailed error message from the response
+        // If still 401, throw with detailed error
         if (response.status === 401) {
-            devError('Still 401 after refresh - token is invalid');
-            try {
-                const errorBody = await response.clone().json();
-                if (errorBody.error) {
-                    devError('Server auth error:', errorBody.error);
-                    throw new Error(`Auth failed: ${errorBody.error}`);
-                }
-            } catch (parseError) {
-                // Ignore JSON parse errors
+            devError('Still 401 after all attempts');
+            if (serverError) {
+                throw new Error(`Auth failed: ${serverError}`);
             }
             throw new Error('Session expired - please refresh the page and try again');
         }
     }
 
     return response;
+}
+
+/**
+ * Diagnostic function to test auth - call from browser console: SimpleSim.testAuth()
+ */
+export async function testAuth() {
+    console.log('=== AUTH DIAGNOSTIC TEST ===');
+
+    // Check state
+    console.log('1. State check:');
+    console.log('   - User:', state.user?.id || 'NOT SET');
+    console.log('   - Session:', state.session ? 'SET' : 'NOT SET');
+    console.log('   - Session access_token:', state.session?.access_token ? 'SET (length: ' + state.session.access_token.length + ')' : 'NOT SET');
+
+    // Get fresh token
+    console.log('\n2. Getting fresh token...');
+    const token = await getFreshAccessToken();
+    if (!token) {
+        console.error('   FAILED: No token available');
+        return { success: false, error: 'No token' };
+    }
+    console.log('   Token length:', token.length);
+    console.log('   Token preview:', token.substring(0, 50) + '...');
+
+    // Decode token
+    try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        console.log('   Token payload:', payload);
+        const exp = new Date(payload.exp * 1000);
+        console.log('   Expires:', exp.toISOString());
+        console.log('   Expired:', new Date() > exp);
+    } catch (e) {
+        console.error('   Failed to decode token:', e.message);
+    }
+
+    // Test Edge Function with raw fetch
+    console.log('\n3. Testing Edge Function (raw fetch)...');
+    const testUrl = STORE_KEY_URL.replace('store-api-key', 'store-api-key'); // Same URL
+
+    try {
+        const response = await fetch(testUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            },
+            body: JSON.stringify({ test: true }) // Will fail validation but auth should pass
+        });
+
+        console.log('   Response status:', response.status);
+        console.log('   Response headers:', Object.fromEntries(response.headers.entries()));
+
+        const body = await response.text();
+        console.log('   Response body:', body);
+
+        try {
+            const json = JSON.parse(body);
+            console.log('   Parsed JSON:', json);
+
+            if (response.status === 401) {
+                console.error('\n=== AUTH FAILED ===');
+                console.error('Server error:', json.error);
+                return { success: false, error: json.error, status: 401 };
+            }
+        } catch (e) {
+            console.log('   (Body is not JSON)');
+        }
+
+        if (response.status === 400) {
+            console.log('\n=== AUTH SUCCESS ===');
+            console.log('Got 400 (expected - test payload invalid), but AUTH PASSED!');
+            return { success: true, status: 400, note: 'Auth passed, request validation failed (expected)' };
+        }
+
+        return { success: response.ok, status: response.status };
+    } catch (e) {
+        console.error('   Fetch failed:', e.message);
+        return { success: false, error: e.message };
+    }
 }
 
 // ============================================

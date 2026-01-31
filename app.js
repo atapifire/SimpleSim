@@ -21,7 +21,8 @@ import {
     checkSessionStatus,
     unlockSession,
     getSessionTimeRemaining,
-    formatTimeRemaining
+    formatTimeRemaining,
+    testAuth
 } from './job-queue.js';
 
 // --- Initialization ---
@@ -56,6 +57,9 @@ async function init() {
         devLog('Running in DEV mode');
         document.title = 'SimpleSim [DEV]';
     }
+
+    // Expose debug functions globally
+    window.testAuth = testAuth;
 
     // Setup health indicator
     setupHealthIndicator();
