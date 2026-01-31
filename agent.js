@@ -1,6 +1,7 @@
 /**
  * Agent Mode Runtime
  * Multi-pass agentic generation with tool calling
+ * Enhanced with model-specific prompts and surgical edit tools
  */
 
 import { state } from './state.js';
@@ -9,6 +10,8 @@ import { thinking, devLog, devError } from './thinking.js';
 import { analyzeProjectHealth, generateCodeMap, estimateTokens, formatTokenCount } from './tokens.js';
 import { checkModelToolSupport } from './ai.js';
 import { getApiKey } from './job-queue.js';
+import { getModelProfile, getPromptStyle } from './model-profiles.js';
+import { applyEdits, validateEdits, validateFileSyntax } from './file-ops.js';
 
 // Agent configuration
 const MAX_ITERATIONS = 10;
@@ -20,6 +23,7 @@ let iterationCount = 0;
 
 /**
  * Available tools for the agent
+ * Enhanced with edit_file, read_file_section, and validate_file
  */
 const TOOLS = [
     {
@@ -42,8 +46,33 @@ const TOOLS = [
     {
         type: "function",
         function: {
+            name: "read_file_section",
+            description: "Read a specific section of a file by line numbers. Use for large files to avoid reading everything.",
+            parameters: {
+                type: "object",
+                properties: {
+                    path: {
+                        type: "string",
+                        description: "The file path to read"
+                    },
+                    start_line: {
+                        type: "number",
+                        description: "Starting line number (1-indexed)"
+                    },
+                    end_line: {
+                        type: "number",
+                        description: "Ending line number (inclusive)"
+                    }
+                },
+                required: ["path", "start_line", "end_line"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
             name: "write_file",
-            description: "Create or overwrite a file with new content",
+            description: "Create or overwrite a file with new content. Use for new files or complete rewrites.",
             parameters: {
                 type: "object",
                 properties: {
@@ -57,6 +86,41 @@ const TOOLS = [
                     }
                 },
                 required: ["path", "content"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "edit_file",
+            description: "Make surgical edits to a file using search/replace. More efficient than rewriting entire file. Use for small to medium changes.",
+            parameters: {
+                type: "object",
+                properties: {
+                    path: {
+                        type: "string",
+                        description: "The file path to edit"
+                    },
+                    edits: {
+                        type: "array",
+                        description: "Array of search/replace operations",
+                        items: {
+                            type: "object",
+                            properties: {
+                                search: {
+                                    type: "string",
+                                    description: "Exact text to find (must be unique in file)"
+                                },
+                                replace: {
+                                    type: "string",
+                                    description: "Text to replace it with"
+                                }
+                            },
+                            required: ["search", "replace"]
+                        }
+                    }
+                },
+                required: ["path", "edits"]
             }
         }
     },
@@ -81,7 +145,7 @@ const TOOLS = [
         type: "function",
         function: {
             name: "list_files",
-            description: "List all files in the project with their sizes",
+            description: "List all files in the project with their sizes and line counts",
             parameters: {
                 type: "object",
                 properties: {},
@@ -109,6 +173,23 @@ const TOOLS = [
     {
         type: "function",
         function: {
+            name: "validate_file",
+            description: "Check if a file is valid (parseable HTML/JS/CSS). Call after edits to verify changes.",
+            parameters: {
+                type: "object",
+                properties: {
+                    path: {
+                        type: "string",
+                        description: "The file path to validate"
+                    }
+                },
+                required: ["path"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
             name: "finish",
             description: "Signal that all changes are complete and ready to commit",
             parameters: {
@@ -127,6 +208,7 @@ const TOOLS = [
 
 /**
  * Execute a tool call
+ * Enhanced with edit_file, read_file_section, and validate_file
  */
 function executeTool(name, args) {
     devLog(`Executing tool: ${name}`, args);
@@ -135,9 +217,39 @@ function executeTool(name, args) {
         case 'read_file': {
             const file = workingFiles.find(f => f.path === args.path);
             if (file) {
-                return { success: true, content: file.content };
+                const lines = file.content.split('\n').length;
+                return {
+                    success: true,
+                    content: file.content,
+                    lines: lines,
+                    hint: lines > 200 ? 'Large file. Consider using read_file_section for specific parts.' : undefined
+                };
             }
             return { success: false, error: `File not found: ${args.path}` };
+        }
+
+        case 'read_file_section': {
+            const file = workingFiles.find(f => f.path === args.path);
+            if (!file) {
+                return { success: false, error: `File not found: ${args.path}` };
+            }
+
+            const lines = file.content.split('\n');
+            const startLine = Math.max(1, args.start_line || 1);
+            const endLine = Math.min(lines.length, args.end_line || lines.length);
+
+            if (startLine > lines.length) {
+                return { success: false, error: `Start line ${startLine} exceeds file length (${lines.length} lines)` };
+            }
+
+            const section = lines.slice(startLine - 1, endLine);
+            return {
+                success: true,
+                content: section.join('\n'),
+                start_line: startLine,
+                end_line: endLine,
+                total_lines: lines.length
+            };
         }
 
         case 'write_file': {
@@ -150,6 +262,49 @@ function executeTool(name, args) {
                 devLog(`Created file: ${args.path}`);
             }
             return { success: true, message: `File written: ${args.path}` };
+        }
+
+        case 'edit_file': {
+            const file = workingFiles.find(f => f.path === args.path);
+            if (!file) {
+                return { success: false, error: `File not found: ${args.path}` };
+            }
+
+            if (!args.edits || !Array.isArray(args.edits) || args.edits.length === 0) {
+                return { success: false, error: 'No edits provided. Expected array of {search, replace} objects.' };
+            }
+
+            // Validate edits first
+            const validation = validateEdits(file.content, args.edits);
+            if (!validation.valid) {
+                return {
+                    success: false,
+                    error: 'Edit validation failed',
+                    issues: validation.errors,
+                    hint: 'Make sure search strings are unique and match exactly. Include more context if needed.'
+                };
+            }
+
+            // Apply edits
+            const result = applyEdits(file.content, args.edits);
+            if (!result.success) {
+                return {
+                    success: false,
+                    error: result.error,
+                    failedEdit: result.failedEdit,
+                    suggestion: result.suggestion
+                };
+            }
+
+            // Update file content
+            file.content = result.content;
+            devLog(`Edited file: ${args.path} (${args.edits.length} changes)`);
+
+            return {
+                success: true,
+                message: `Applied ${args.edits.length} edit(s) to ${args.path}`,
+                hint: 'Call validate_file to verify changes are valid.'
+            };
         }
 
         case 'delete_file': {
@@ -174,13 +329,20 @@ function executeTool(name, args) {
 
         case 'search_files': {
             const results = [];
-            const regex = new RegExp(args.query, 'gi');
+            let regex;
+            try {
+                regex = new RegExp(args.query, 'gi');
+            } catch (e) {
+                // Fall back to literal search if regex is invalid
+                regex = new RegExp(args.query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+            }
 
             for (const file of workingFiles) {
                 const matches = [];
                 const lines = file.content.split('\n');
 
                 lines.forEach((line, i) => {
+                    regex.lastIndex = 0; // Reset regex state
                     if (regex.test(line)) {
                         matches.push({ line: i + 1, content: line.trim().substring(0, 100) });
                     }
@@ -194,6 +356,21 @@ function executeTool(name, args) {
             return { success: true, results };
         }
 
+        case 'validate_file': {
+            const file = workingFiles.find(f => f.path === args.path);
+            if (!file) {
+                return { success: false, error: `File not found: ${args.path}` };
+            }
+
+            const validation = validateFileSyntax(args.path, file.content);
+            return {
+                success: true,
+                valid: validation.valid,
+                error: validation.error,
+                warnings: validation.warnings
+            };
+        }
+
         case 'finish': {
             return { success: true, finished: true, summary: args.summary };
         }
@@ -204,29 +381,45 @@ function executeTool(name, args) {
 }
 
 /**
- * Build the agent system prompt
+ * Build the agent system prompt with model-specific optimizations
  */
-function buildAgentSystemPrompt(isNewProject) {
+function buildAgentSystemPrompt(isNewProject, modelProfile) {
     const mode = isNewProject ? 'CREATE' : 'MODIFY';
+    const style = modelProfile?.promptStyle || 'markdown';
 
-    return `You are an expert Frontend Developer agent. You ${isNewProject ? 'create' : 'modify'} static websites through iterative tool calls.
-
-MODE: ${mode}
-
-AVAILABLE TOOLS:
+    // Base tool documentation
+    const toolDocs = `
 - read_file(path): Read a file's content
-- write_file(path, content): Create or update a file
+- read_file_section(path, start_line, end_line): Read specific lines (for large files)
+- write_file(path, content): Create or overwrite a file
+- edit_file(path, edits): Make surgical changes using search/replace
 - delete_file(path): Remove a file
 - list_files(): See all project files with sizes
 - search_files(query): Find text across files
-- finish(summary): Complete the task and commit changes
+- validate_file(path): Check if file syntax is valid
+- finish(summary): Complete the task`;
 
-WORKFLOW:
-1. ${isNewProject ? 'Plan the file structure' : 'Use list_files() and read_file() to understand the current project'}
-2. Make changes using write_file() - one file at a time
-3. Continue until all requested changes are complete
-4. Call finish() with a summary when done
+    // Efficiency rules
+    const efficiencyRules = `
+EFFICIENCY RULES:
+1. Use read_file_section for large files (>200 lines) - read only what you need
+2. Use edit_file for small changes - avoids full file rewrites
+3. Use write_file only for new files or complete rewrites
+4. Call validate_file after making changes to verify syntax
+5. Call list_files first to understand project structure
 
+CHANGE STRATEGY:
+- Small change (<10 lines): Use edit_file with search/replace
+- Medium change (10-50 lines): Use edit_file with multiple edits
+- Large change (>50 lines or structural): Use write_file
+
+SEARCH/REPLACE TIPS:
+- Include 1-2 lines of context around the change for uniqueness
+- Search strings must be unique in the file
+- If unsure, read the file first to find exact text`;
+
+    // Requirements (same for all)
+    const requirements = `
 REQUIREMENTS:
 - Always include index.html as entry point
 - Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
@@ -234,12 +427,57 @@ REQUIREMENTS:
 - Use vanilla JavaScript
 - Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs
 - Make it mobile-responsive
-- Keep individual files under 200 lines when practical
+- Keep individual files under 200 lines when practical`;
 
-IMPORTANT:
+    // Model-specific formatting
+    if (style === 'xml-tags') {
+        // Claude-optimized prompt
+        return `<role>You are an expert Frontend Developer agent. You ${isNewProject ? 'create' : 'modify'} static websites through iterative tool calls.</role>
+
+<mode>${mode}</mode>
+
+<tools>${toolDocs}
+</tools>
+
+<workflow>
+1. ${isNewProject ? 'Plan the file structure' : 'Use list_files() to understand the project, then read_file() for specific files'}
+2. Make changes using edit_file (preferred) or write_file
+3. Validate changes with validate_file
+4. Continue until all requested changes are complete
+5. Call finish() with a summary when done
+</workflow>
+${efficiencyRules}
+${requirements}
+
+<important>
 - Make changes incrementally - don't try to do everything in one call
 - Test your understanding by reading files before modifying
-- When modifying existing code, preserve existing functionality unless asked to change
+- Preserve existing functionality unless asked to change
+- Call finish() ONLY when ALL changes are complete
+</important>`;
+    }
+
+    // Default markdown-style prompt
+    return `You are an expert Frontend Developer agent. You ${isNewProject ? 'create' : 'modify'} static websites through iterative tool calls.
+
+### Mode: ${mode}
+
+### Available Tools
+${toolDocs}
+
+### Workflow
+1. ${isNewProject ? 'Plan the file structure' : 'Use list_files() to understand the project, then read_file() for specific files'}
+2. Make changes using edit_file (preferred) or write_file
+3. Validate changes with validate_file
+4. Continue until all requested changes are complete
+5. Call finish() with a summary when done
+${efficiencyRules}
+${requirements}
+
+### Important
+- Make changes incrementally - don't try to do everything in one call
+- Test your understanding by reading files before modifying
+- Preserve existing functionality unless asked to change
 - Call finish() ONLY when ALL changes are complete`;
 }
 
@@ -290,12 +528,16 @@ export async function runAgent(prompt, currentFiles) {
         thinking.setStatus('thinking', 'Agent starting...');
     }
 
+    // Get model profile for optimized prompts
+    const modelProfile = getModelProfile(modelId);
+
     devLog('Agent mode:', isNewProject ? 'NEW PROJECT' : 'MODIFY EXISTING');
     devLog('Model tool support:', toolSupport, modelId);
+    devLog('Model profile:', modelProfile.family, `(${modelProfile.promptStyle} style)`);
 
-    // Build initial messages
+    // Build initial messages with model-specific prompts
     const messages = [
-        { role: "system", content: buildAgentSystemPrompt(isNewProject) }
+        { role: "system", content: buildAgentSystemPrompt(isNewProject, modelProfile) }
     ];
 
     // For existing projects, provide context

@@ -3,14 +3,32 @@ import { security } from './security.js';
 import { thinking, devLog, devError } from './thinking.js';
 import { analyzeProjectHealth, generateCodeMap, estimateTokens, formatTokenCount, buildRefactoringPrompt } from './tokens.js';
 import { getApiKey } from './job-queue.js';
+import {
+    getModelProfile,
+    getModelFamily,
+    getContextLimit,
+    getPromptStyle,
+    getJsonReliability,
+    prefersEditFormat
+} from './model-profiles.js';
+import {
+    FILE_ACTIONS,
+    applyEdits,
+    validateEdits,
+    mergeWithEdits,
+    validateFileSyntax,
+    validateGenerationResult,
+    detectTruncation
+} from './file-ops.js';
 
 // Timeout for API requests (3 minutes for streaming)
 const API_TIMEOUT = 180000;
 
-// Token thresholds for edit strategies
-const SMALL_PROJECT_TOKENS = 8000;   // Full content for small projects
-const MEDIUM_PROJECT_TOKENS = 20000; // Summarized for medium
-// Above MEDIUM = code map only
+// Token thresholds for context strategies (can be overridden by model profile)
+const DEFAULT_SMALL_PROJECT_TOKENS = 8000;   // Full content for small projects
+const DEFAULT_MEDIUM_PROJECT_TOKENS = 20000; // Summarized for medium
+const DEFAULT_LARGE_PROJECT_TOKENS = 50000;  // Selective context for very large
+// Above LARGE = selective context only
 
 /**
  * Generate or update a project based on user prompt
@@ -18,25 +36,35 @@ const MEDIUM_PROJECT_TOKENS = 20000; // Summarized for medium
 export async function generateProject(prompt, currentFiles) {
     const isRevision = currentFiles && Array.isArray(currentFiles) && currentFiles.length > 0;
     const health = isRevision ? analyzeProjectHealth(currentFiles) : null;
+    const modelId = state.settings.openRouterModel;
+    const modelProfile = getModelProfile(modelId);
 
     devLog('Generation mode:', isRevision ? 'REVISION' : 'NEW PROJECT');
+    devLog('Model profile:', modelProfile.family, `(${modelProfile.promptStyle} style)`);
     if (health) {
         devLog('Project health:', health.status, `(${formatTokenCount(health.totalTokens)} tokens)`);
     }
 
-    // Choose the optimal prompt strategy based on project size
+    // Pre-generation validation
+    const preValidation = validateGenerationRequest(currentFiles, prompt, modelProfile);
+    if (!preValidation.valid) {
+        devError('Pre-generation validation failed:', preValidation.reason);
+        thinking.log('warning', preValidation.reason);
+    }
+
+    // Choose the optimal prompt strategy based on model and project size
     const systemPrompt = isRevision
-        ? buildRevisionPrompt(currentFiles, health)
-        : buildNewProjectPrompt();
+        ? buildRevisionPrompt(currentFiles, health, modelProfile)
+        : buildNewProjectPrompt(modelProfile);
 
     let messages = [
         { role: "system", content: systemPrompt },
         { role: "user", content: prompt }
     ];
 
-    // For revisions, include context based on project size
+    // For revisions, include context based on project size and model capabilities
     if (isRevision) {
-        const fileContext = buildOptimalContext(currentFiles, health);
+        const fileContext = buildOptimalContext(currentFiles, health, modelProfile, prompt);
         messages.splice(1, 0, {
             role: "user",
             content: fileContext
@@ -45,10 +73,33 @@ export async function generateProject(prompt, currentFiles) {
 
     const result = await generateWithOpenRouter(messages);
 
-    // For revisions, merge changes with existing files
+    // For revisions, merge changes with existing files (now supports edit action)
     if (isRevision && result.files) {
-        result.files = mergeFiles(currentFiles, result.files);
-        devLog('Merged files:', result.files.map(f => f.path));
+        const mergeResult = mergeFilesEnhanced(currentFiles, result.files);
+        result.files = mergeResult.files;
+
+        // Log any merge errors
+        if (mergeResult.errors.length > 0) {
+            devError('Merge errors:', mergeResult.errors);
+            thinking.log('warning', `Some edits failed: ${mergeResult.errors.length} issues`);
+        }
+
+        devLog('Merged files:', mergeResult.applied);
+
+        // Post-generation validation
+        const postValidation = validateGenerationResult(currentFiles, result.files);
+        if (!postValidation.valid) {
+            devError('Post-generation issues:', postValidation.issues);
+            for (const issue of postValidation.issues) {
+                thinking.log('warning', issue);
+            }
+
+            // Attempt recovery for truncation
+            if (postValidation.issues.some(i => i.includes('truncation') || i.includes('reduced'))) {
+                devLog('Attempting truncation recovery...');
+                result.files = attemptTruncationRecovery(currentFiles, result.files);
+            }
+        }
     }
 
     return result;
@@ -92,22 +143,13 @@ RULES:
 }
 
 /**
- * Build system prompt for new projects
+ * Build system prompt for new projects with model-specific optimizations
  */
-function buildNewProjectPrompt() {
-    return `You are an expert Frontend Developer. Create a complete static website.
+function buildNewProjectPrompt(modelProfile) {
+    const style = modelProfile?.promptStyle || 'markdown';
 
-OUTPUT FORMAT - Return ONLY valid JSON (no markdown, no code blocks):
-{
-  "files": [
-    { "path": "index.html", "content": "<!DOCTYPE html>..." },
-    { "path": "styles.css", "content": "/* CSS */" },
-    { "path": "script.js", "content": "// JavaScript" }
-  ],
-  "description": "Brief description (max 10 words)"
-}
-
-REQUIREMENTS:
+    // Base requirements (same for all models)
+    const requirements = `
 - Always include index.html as entry point
 - Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
 - Write clean, semantic HTML5
@@ -116,79 +158,207 @@ REQUIREMENTS:
 - Make it mobile-responsive
 - Include basic interactivity where appropriate
 - Keep files under 200 lines each when possible`;
+
+    // Model-specific prompt formatting
+    if (style === 'xml-tags') {
+        // Claude-optimized prompt with XML tags
+        return `<role>You are an expert Frontend Developer. Create a complete static website.</role>
+
+<output_format>
+Return ONLY valid JSON matching this schema:
+{
+  "files": [
+    { "path": "index.html", "content": "<!DOCTYPE html>..." },
+    { "path": "styles.css", "content": "/* CSS */" },
+    { "path": "script.js", "content": "// JavaScript" }
+  ],
+  "description": "Brief description (max 10 words)"
+}
+</output_format>
+
+<requirements>${requirements}
+</requirements>
+
+<critical>Output ONLY the JSON object. No markdown code blocks, no explanation.</critical>`;
+    }
+
+    // Default markdown-style prompt (GPT, Gemini, etc.)
+    return `You are an expert Frontend Developer. Create a complete static website.
+
+### Output Format
+Return **ONLY** valid JSON (no markdown, no code blocks):
+\`\`\`
+{
+  "files": [
+    { "path": "index.html", "content": "<!DOCTYPE html>..." },
+    { "path": "styles.css", "content": "/* CSS */" },
+    { "path": "script.js", "content": "// JavaScript" }
+  ],
+  "description": "Brief description (max 10 words)"
+}
+\`\`\`
+
+### Requirements${requirements}
+
+**CRITICAL**: Output ONLY the JSON object. No explanation before or after.`;
 }
 
 /**
- * Build system prompt for revisions - uses efficient edit format
+ * Build system prompt for revisions - uses efficient edit format with model-specific optimizations
  */
-function buildRevisionPrompt(currentFiles, health) {
+function buildRevisionPrompt(currentFiles, health, modelProfile) {
+    const style = modelProfile?.promptStyle || 'markdown';
+    const useEditFormat = modelProfile?.preferEditFormat !== false;
+
     const fileList = currentFiles.map(f => {
         const tokens = estimateTokens(f.content);
-        const status = tokens >= 5000 ? ' ⚠️ LARGE' : '';
+        const status = tokens >= 5000 ? ' [LARGE]' : '';
         return `- ${f.path} (${formatTokenCount(tokens)} tokens)${status}`;
     }).join('\n');
 
-    // Use search/replace format for efficiency (inspired by Aider)
-    return `You are an expert Frontend Developer. Modify an existing website based on the user's request.
+    // Edit format instructions (for models that support it well)
+    const editFormatInstructions = useEditFormat ? `
+For SMALL changes (under 10 lines), use "edit" action with search/replace:
+{
+  "path": "styles.css",
+  "action": "edit",
+  "edits": [
+    { "search": "color: red;", "replace": "color: blue;" },
+    { "search": "font-size: 14px;", "replace": "font-size: 16px;" }
+  ]
+}
 
-PROJECT FILES:
+SEARCH/REPLACE RULES:
+- Search strings must be UNIQUE in the file
+- Include 1-2 lines of context if needed for uniqueness
+- Search must match EXACTLY (including whitespace)
+` : '';
+
+    // Model-specific prompt formatting
+    if (style === 'xml-tags') {
+        // Claude-optimized prompt with XML tags
+        return `<role>You are an expert Frontend Developer. Modify an existing website based on the user's request.</role>
+
+<project_files>
 ${fileList}
 Total: ${formatTokenCount(health.totalTokens)} tokens
+</project_files>
 
-OUTPUT FORMAT - Return ONLY valid JSON:
+<output_format>
+Return ONLY valid JSON:
 {
   "files": [
     {
       "path": "filename.ext",
-      "content": "complete new file content",
-      "action": "modify"
+      "action": "modify|add|delete|edit",
+      "content": "complete file content for modify/add",
+      "edits": [{"search": "...", "replace": "..."}]  // for edit action only
     }
   ],
   "description": "Brief description of changes"
 }
+</output_format>
 
-EFFICIENCY RULES:
-1. Only return files that CHANGE - never include unchanged files
-2. Actions: "modify" (update), "add" (new file), "delete" (remove)
-3. Return COMPLETE file content for modified files
-4. For small changes, still return the full file content
-5. Preserve existing functionality unless asked to change
+<actions>
+- "modify": Full file replacement (use for large changes)
+- "add": Create new file
+- "delete": Remove file
+- "edit": Search/replace for surgical changes (preferred for small changes)
+</actions>
+${editFormatInstructions ? `<edit_format>${editFormatInstructions}</edit_format>` : ''}
+<rules>
+- Only return files that CHANGE - never include unchanged files
+- For modify/add: return COMPLETE file content
+- Preserve existing functionality unless asked to change
+- Files marked [LARGE]: consider splitting when making changes
+</rules>`;
+    }
 
-FILE SIZE GUIDANCE:
-- If a file is marked ⚠️ LARGE, consider splitting it when making changes
-- Keep individual files under 200 lines when practical
-- Split by responsibility: layout, components, utilities, etc.
+    // Default markdown-style prompt (GPT, Gemini, etc.)
+    return `You are an expert Frontend Developer. Modify an existing website based on the user's request.
 
-EXAMPLE for "change button color to blue":
+### Project Files
+${fileList}
+Total: ${formatTokenCount(health.totalTokens)} tokens
+
+### Output Format
+Return **ONLY** valid JSON:
+\`\`\`json
 {
   "files": [
-    { "path": "styles.css", "content": "/* full updated CSS */", "action": "modify" }
+    {
+      "path": "filename.ext",
+      "action": "modify|add|delete|edit",
+      "content": "complete file content",
+      "edits": [{"search": "...", "replace": "..."}]
+    }
   ],
-  "description": "Changed button color to blue"
-}`;
+  "description": "Brief description"
+}
+\`\`\`
+
+### Actions
+- \`modify\`: Full file replacement (use for large changes)
+- \`add\`: Create new file
+- \`delete\`: Remove file
+- \`edit\`: Search/replace for surgical changes
+${editFormatInstructions}
+### Rules
+1. Only return files that CHANGE
+2. For modify/add: return COMPLETE content
+3. Preserve existing functionality
+4. Files marked [LARGE]: consider splitting
+
+**CRITICAL**: Output ONLY the JSON. No explanation.`;
 }
 
 /**
- * Build optimal context based on project size
+ * Build optimal context based on project size and model capabilities
  */
-function buildOptimalContext(files, health) {
+function buildOptimalContext(files, health, modelProfile, prompt) {
     const totalTokens = health.totalTokens;
 
+    // Adjust thresholds based on model's context window
+    const contextLimit = modelProfile?.contextWindow || 32000;
+    const safeLimit = contextLimit * 0.6; // Reserve 40% for output
+
+    // Calculate adaptive thresholds
+    const smallThreshold = Math.min(DEFAULT_SMALL_PROJECT_TOKENS, safeLimit * 0.2);
+    const mediumThreshold = Math.min(DEFAULT_MEDIUM_PROJECT_TOKENS, safeLimit * 0.5);
+    const largeThreshold = Math.min(DEFAULT_LARGE_PROJECT_TOKENS, safeLimit * 0.8);
+
+    devLog('Context thresholds:', { small: smallThreshold, medium: mediumThreshold, large: largeThreshold });
+    devLog('Project tokens:', totalTokens, 'Safe limit:', safeLimit);
+
+    // Gemini with 1M context can handle much more
+    if (modelProfile?.family === 'gemini' && contextLimit >= 1000000) {
+        if (totalTokens < safeLimit * 0.3) {
+            devLog('Using FULL context strategy (Gemini large context)');
+            return buildFullContext(files);
+        }
+    }
+
     // Small projects: include everything
-    if (totalTokens < SMALL_PROJECT_TOKENS) {
+    if (totalTokens < smallThreshold) {
         devLog('Using FULL context strategy');
         return buildFullContext(files);
     }
 
     // Medium projects: summarized with key excerpts
-    if (totalTokens < MEDIUM_PROJECT_TOKENS) {
+    if (totalTokens < mediumThreshold) {
         devLog('Using SUMMARIZED context strategy');
         return buildSummarizedContext(files);
     }
 
-    // Large projects: code map only
-    devLog('Using CODE MAP context strategy');
-    return buildCodeMapContext(files);
+    // Large projects: code map with main files
+    if (totalTokens < largeThreshold) {
+        devLog('Using CODE MAP context strategy');
+        return buildCodeMapContext(files);
+    }
+
+    // Very large projects: selective context based on prompt
+    devLog('Using SELECTIVE context strategy');
+    return buildSelectiveContext(files, prompt, safeLimit);
 }
 
 /**
@@ -252,7 +422,89 @@ If you need to see a specific file's full content, ask me to provide it.`;
 }
 
 /**
- * Merge AI response files with existing files
+ * Selective context - only include files relevant to the prompt
+ * For very large projects (50+ files)
+ */
+function buildSelectiveContext(files, prompt, maxTokens) {
+    const promptLower = prompt.toLowerCase();
+
+    // Always include: entry points, config files
+    const alwaysInclude = ['index.html', 'index.js', 'main.js', 'app.js', 'config.js', 'package.json'];
+
+    // Score each file for relevance
+    const scoredFiles = files.map(f => {
+        let score = 0;
+        const pathLower = f.path.toLowerCase();
+        const contentLower = f.content.toLowerCase();
+
+        // Always include priority files
+        if (alwaysInclude.some(p => pathLower.includes(p))) {
+            score += 100;
+        }
+
+        // Check if file path is mentioned in prompt
+        const fileName = f.path.split('/').pop().replace(/\.[^.]+$/, '');
+        if (promptLower.includes(fileName.toLowerCase())) {
+            score += 50;
+        }
+
+        // Check for keyword matches in prompt
+        const keywords = prompt.match(/\b\w{4,}\b/g) || [];
+        for (const keyword of keywords) {
+            if (pathLower.includes(keyword.toLowerCase())) score += 20;
+            if (contentLower.includes(keyword.toLowerCase())) score += 5;
+        }
+
+        // Boost small files (easier to include)
+        const tokens = estimateTokens(f.content);
+        if (tokens < 500) score += 10;
+        if (tokens < 1000) score += 5;
+
+        return { file: f, score, tokens };
+    });
+
+    // Sort by score and select files within token budget
+    scoredFiles.sort((a, b) => b.score - a.score);
+
+    const selectedFiles = [];
+    let totalTokens = 0;
+    const tokenBudget = maxTokens * 0.5; // Use half for files, rest for prompts
+
+    for (const { file, score, tokens } of scoredFiles) {
+        if (totalTokens + tokens <= tokenBudget || selectedFiles.length < 3) {
+            selectedFiles.push(file);
+            totalTokens += tokens;
+        }
+        if (totalTokens > tokenBudget) break;
+    }
+
+    devLog(`Selective context: ${selectedFiles.length} of ${files.length} files (${formatTokenCount(totalTokens)} tokens)`);
+
+    // Build context with selected files
+    const fileContents = selectedFiles.map(f =>
+        `=== ${f.path} ===\n${f.content}`
+    ).join('\n\n');
+
+    // Include file list for awareness
+    const fileList = files.map(f => {
+        const included = selectedFiles.includes(f) ? ' [INCLUDED]' : '';
+        return `- ${f.path}${included}`;
+    }).join('\n');
+
+    return `PROJECT FILES (${files.length} total, ${selectedFiles.length} included based on relevance):
+${fileList}
+
+INCLUDED FILE CONTENTS:
+
+${fileContents}
+
+Note: This is a LARGE project. I've included the most relevant files.
+If you need another file, ask me to provide it.
+When modifying files, return COMPLETE content or use edit action for small changes.`;
+}
+
+/**
+ * Merge AI response files with existing files (legacy - kept for compatibility)
  */
 function mergeFiles(existingFiles, newFiles) {
     const result = [...existingFiles];
@@ -276,6 +528,76 @@ function mergeFiles(existingFiles, newFiles) {
     }
 
     return result;
+}
+
+/**
+ * Enhanced merge with support for edit action and validation
+ */
+function mergeFilesEnhanced(existingFiles, newFiles) {
+    // Use the file-ops mergeWithEdits for full edit support
+    const result = mergeWithEdits(existingFiles, newFiles);
+
+    // Log applied changes
+    for (const applied of result.applied) {
+        devLog(applied);
+    }
+
+    return result;
+}
+
+/**
+ * Validate generation request before sending to AI
+ */
+function validateGenerationRequest(files, prompt, modelProfile) {
+    if (!files || files.length === 0) {
+        return { valid: true }; // New project, no validation needed
+    }
+
+    const totalTokens = files.reduce((sum, f) => sum + estimateTokens(f.content), 0);
+    const contextLimit = modelProfile?.contextWindow || 32000;
+    const safeLimit = contextLimit * 0.8;
+
+    if (totalTokens > safeLimit) {
+        return {
+            valid: false,
+            reason: `Project size (${formatTokenCount(totalTokens)}) exceeds safe limit for ${modelProfile?.family || 'this model'} (${formatTokenCount(safeLimit)}). Consider using a model with larger context window.`
+        };
+    }
+
+    return { valid: true };
+}
+
+/**
+ * Attempt to recover from truncation by restoring unmodified sections
+ */
+function attemptTruncationRecovery(originalFiles, newFiles) {
+    const recovered = [...newFiles];
+
+    for (let i = 0; i < recovered.length; i++) {
+        const newFile = recovered[i];
+        const original = originalFiles.find(f => f.path === newFile.path);
+
+        if (!original || !newFile.content) continue;
+
+        const truncCheck = detectTruncation(original.content, newFile.content);
+
+        if (truncCheck.truncated) {
+            devLog(`Attempting recovery for truncated file: ${newFile.path}`);
+
+            // Check if the new content is a prefix of the original
+            if (original.content.startsWith(newFile.content.trim())) {
+                // Complete truncation - restore original
+                devLog(`Restored original for ${newFile.path} (complete truncation)`);
+                recovered[i] = { ...newFile, content: original.content };
+                thinking.log('warning', `Restored ${newFile.path} - AI response was truncated`);
+            } else {
+                // Partial changes were made - keep new content but warn
+                thinking.log('warning', `${newFile.path} may be incomplete - verify changes`);
+            }
+        }
+    }
+
+    return recovered;
 }
 
 /**
