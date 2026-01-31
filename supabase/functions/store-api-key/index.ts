@@ -1,5 +1,6 @@
 /**
  * Store API Key Edge Function
+ * Version: 2026-01-31-v2
  *
  * Implements zero-knowledge key storage using Shamir's Secret Sharing:
  * 1. Receives plaintext API key from authenticated user

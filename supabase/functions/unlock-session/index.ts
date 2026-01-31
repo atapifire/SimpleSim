@@ -1,5 +1,6 @@
 /**
  * Unlock Session Edge Function
+ * Version: 2026-01-31-v2
  *
  * Combines key shares to create a temporary active session:
  * 1. Receives Share B from client (encrypted with PIN/Passkey)
