@@ -21,43 +21,82 @@ const UNLOCK_SESSION_URL = `${SUPABASE_URL}/functions/v1/unlock-session`;
 // Client cannot call scheduler directly as it requires service_role key
 
 /**
- * Get access token from state, with no network calls (to avoid hanging)
+ * Get fresh access token, with timeout to prevent hanging
+ * Supabase's getSession() can hang indefinitely, so we use Promise.race with timeout
  */
-function getAccessToken() {
-    const token = state.session?.access_token;
-    if (token) {
-        // Log token metadata (not the actual token for security)
+async function getFreshAccessToken() {
+    // First check if we have a cached token that looks valid
+    const cachedToken = state.session?.access_token;
+    if (cachedToken) {
         try {
-            const payload = JSON.parse(atob(token.split('.')[1]));
+            const payload = JSON.parse(atob(cachedToken.split('.')[1]));
             const exp = payload.exp ? new Date(payload.exp * 1000) : null;
             const now = new Date();
-            devLog('Token info:', {
+            const expiresIn = exp ? Math.round((exp - now) / 1000) : 0;
+
+            devLog('Cached token info:', {
                 sub: payload.sub,
                 exp: exp?.toISOString(),
                 isExpired: exp ? now > exp : 'unknown',
-                expiresIn: exp ? Math.round((exp - now) / 1000) + 's' : 'unknown'
+                expiresIn: expiresIn + 's'
             });
+
+            // If token expires in more than 5 minutes, use cached
+            if (expiresIn > 300) {
+                devLog('Using cached token (expires in', expiresIn + 's)');
+                return cachedToken;
+            }
+
+            devLog('Cached token expiring soon, will try to refresh');
         } catch (e) {
-            devLog('Could not parse token');
+            devLog('Could not parse cached token');
         }
-        return token;
     }
-    devLog('No session token in state');
+
+    // Get fresh session with timeout (getSession can hang)
+    devLog('Getting fresh session...');
+    try {
+        const result = await Promise.race([
+            supabase.auth.getSession(),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Session fetch timeout (5s)')), 5000)
+            )
+        ]);
+
+        const { data: { session }, error } = result;
+        if (error) {
+            devError('getSession error:', error.message);
+        } else if (session?.access_token) {
+            state.session = session;
+            devLog('Got fresh session');
+            return session.access_token;
+        }
+    } catch (e) {
+        devError('Fresh session fetch failed:', e.message);
+    }
+
+    // Fall back to cached token if refresh failed
+    if (cachedToken) {
+        devLog('Falling back to cached token');
+        return cachedToken;
+    }
+
+    devLog('No session token available');
     return null;
 }
 
 /**
  * Make an authenticated request to an Edge Function
- * If we get 401, it means the token is stale - user needs to refresh the page
+ * Gets fresh token before request, retries once on 401
  */
 async function authenticatedFetch(url, options = {}) {
-    const token = getAccessToken();
+    let token = await getFreshAccessToken();
 
     if (!token) {
         throw new Error('Not authenticated - please log in or refresh the page');
     }
 
-    const response = await fetch(url, {
+    let response = await fetch(url, {
         ...options,
         headers: {
             ...options.headers,
@@ -66,11 +105,43 @@ async function authenticatedFetch(url, options = {}) {
         }
     });
 
-    // If we get 401, the token is invalid/expired
-    // Supabase auth methods can hang, so just tell user to refresh
+    // If we get 401, try once more with a completely fresh session
     if (response.status === 401) {
-        devError('Got 401 - token is invalid. User needs to refresh page.');
-        throw new Error('Session expired - please refresh the page and try again');
+        devLog('Got 401, forcing session refresh...');
+
+        try {
+            // Force refresh the session
+            const { data: { session }, error } = await Promise.race([
+                supabase.auth.refreshSession(),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Refresh timeout')), 5000)
+                )
+            ]);
+
+            if (!error && session?.access_token) {
+                state.session = session;
+                token = session.access_token;
+                devLog('Session refreshed, retrying request');
+
+                // Retry the request with new token
+                response = await fetch(url, {
+                    ...options,
+                    headers: {
+                        ...options.headers,
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+            }
+        } catch (e) {
+            devError('Session refresh failed:', e.message);
+        }
+
+        // If still 401, give up
+        if (response.status === 401) {
+            devError('Still 401 after refresh - token is invalid');
+            throw new Error('Session expired - please refresh the page and try again');
+        }
     }
 
     return response;
