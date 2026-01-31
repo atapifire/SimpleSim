@@ -126,18 +126,20 @@ const AGENT_TOOLS = [
 ];
 
 Deno.serve(async (req) => {
-  const corsResponse = handleCors(req);
-  if (corsResponse) return corsResponse;
-
-  // Can be triggered by scheduler or directly
-  if (req.method !== 'POST') {
-    return errorResponse('Method not allowed', 405);
-  }
-
-  const startTime = Date.now();
-  const serviceClient = createServiceClient();
-
+  // Top-level try-catch to ensure we always return JSON
   try {
+    const corsResponse = handleCors(req);
+    if (corsResponse) return corsResponse;
+
+    // Can be triggered by scheduler or directly
+    if (req.method !== 'POST') {
+      return errorResponse('Method not allowed', 405);
+    }
+
+    const startTime = Date.now();
+    const serviceClient = createServiceClient();
+
+    try {
     // Check for specific job ID in request body, or claim next pending
     const body = await req.json().catch(() => ({}));
     let jobData: JobData | null = null;
@@ -161,6 +163,19 @@ Deno.serve(async (req) => {
 
       if (data.status === 'processing') {
         // Resume an already-processing job
+        // But first check if it's been stuck too long (> 5 minutes)
+        const lastHeartbeat = data.last_heartbeat ? new Date(data.last_heartbeat) : new Date(data.started_at || data.created_at);
+        const stuckThreshold = 5 * 60 * 1000; // 5 minutes
+
+        if (Date.now() - lastHeartbeat.getTime() > stuckThreshold) {
+          console.log(`Job ${body.jobId} has been stuck for > 5 minutes, marking as failed`);
+          await serviceClient.rpc('fail_job', {
+            p_job_id: body.jobId,
+            p_error_message: 'Job timed out - no heartbeat for 5+ minutes',
+          });
+          return jsonResponse({ error: 'Job was stuck and has been marked as failed', recovered: true });
+        }
+
         jobData = data as JobData;
       } else if (data.status === 'pending') {
         // Claim this specific pending job
@@ -287,6 +302,11 @@ Deno.serve(async (req) => {
     }
 
     return errorResponse('Job processing failed: ' + error.message, 500);
+    }
+  } catch (topLevelError) {
+    // Catch any errors that happen before the main try-catch (imports, env vars, etc.)
+    console.error('Top-level error in process-job:', topLevelError);
+    return errorResponse('Internal error: ' + (topLevelError.message || 'Unknown'), 500);
   }
 });
 
