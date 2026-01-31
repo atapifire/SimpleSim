@@ -31,12 +31,17 @@ jobs:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
       - name: Deploy store-api-key
-        run: supabase functions deploy store-api-key --project-ref ouvrecllkqtwbtrwyhgw
+        run: supabase functions deploy store-api-key --project-ref ouvrecllkqtwbtrwyhgw --no-verify-jwt
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
       - name: Deploy unlock-session
-        run: supabase functions deploy unlock-session --project-ref ouvrecllkqtwbtrwyhgw
+        run: supabase functions deploy unlock-session --project-ref ouvrecllkqtwbtrwyhgw --no-verify-jwt
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+      - name: Deploy auth-test
+        run: supabase functions deploy auth-test --project-ref ouvrecllkqtwbtrwyhgw --no-verify-jwt
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
 
