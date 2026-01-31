@@ -1,6 +1,6 @@
 /**
  * Store API Key Edge Function
- * Version: 2026-01-31-v3 (inline auth)
+ * Version: 2026-01-31-v4 (diagnostic)
  *
  * Implements zero-knowledge key storage using Shamir's Secret Sharing:
  * 1. Receives plaintext API key from authenticated user
@@ -41,8 +41,10 @@ function jsonResponse(data: unknown, status: number = 200): Response {
   });
 }
 
+const FUNCTION_VERSION = '2026-01-31-v4';
+
 function errorResponse(message: string, status: number = 400): Response {
-  return jsonResponse({ error: message }, status);
+  return jsonResponse({ error: message, version: FUNCTION_VERSION }, status);
 }
 
 // Inline auth verification to avoid bundling issues
@@ -116,7 +118,21 @@ Deno.serve(async (req) => {
     return new Response('ok', { headers: corsHeaders });
   }
 
-  // Only accept POST
+  // Version check endpoint (GET returns version info)
+  if (req.method === 'GET') {
+    return jsonResponse({
+      function: 'store-api-key',
+      version: FUNCTION_VERSION,
+      timestamp: new Date().toISOString(),
+      envCheck: {
+        SUPABASE_URL: SUPABASE_URL ? 'set' : 'NOT SET',
+        SUPABASE_ANON_KEY: SUPABASE_ANON_KEY ? 'set' : 'NOT SET',
+        SERVER_PEPPER: SERVER_PEPPER ? 'set' : 'NOT SET',
+      }
+    });
+  }
+
+  // Only accept POST for actual key storage
   if (req.method !== 'POST') {
     return errorResponse('Method not allowed', 405);
   }

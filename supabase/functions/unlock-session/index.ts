@@ -1,6 +1,6 @@
 /**
  * Unlock Session Edge Function
- * Version: 2026-01-31-v3 (inline auth)
+ * Version: 2026-01-31-v4 (diagnostic)
  *
  * Combines key shares to create a temporary active session:
  * 1. Receives Share B from client (encrypted with PIN/Passkey)
@@ -46,8 +46,10 @@ function jsonResponse(data: unknown, status: number = 200): Response {
   });
 }
 
+const FUNCTION_VERSION = '2026-01-31-v4';
+
 function errorResponse(message: string, status: number = 400): Response {
-  return jsonResponse({ error: message }, status);
+  return jsonResponse({ error: message, version: FUNCTION_VERSION }, status);
 }
 
 // Inline auth verification to avoid bundling issues
@@ -119,6 +121,21 @@ Deno.serve(async (req) => {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
+  }
+
+  // Version check endpoint (GET returns version info)
+  if (req.method === 'GET') {
+    return jsonResponse({
+      function: 'unlock-session',
+      version: FUNCTION_VERSION,
+      timestamp: new Date().toISOString(),
+      envCheck: {
+        SUPABASE_URL: SUPABASE_URL ? 'set' : 'NOT SET',
+        SUPABASE_ANON_KEY: SUPABASE_ANON_KEY ? 'set' : 'NOT SET',
+        SERVER_PEPPER: SERVER_PEPPER ? 'set' : 'NOT SET',
+        SESSION_SECRET: SESSION_SECRET ? 'set' : 'NOT SET',
+      }
+    });
   }
 
   if (req.method !== 'POST') {
