@@ -126,23 +126,22 @@ const AGENT_TOOLS = [
 ];
 
 Deno.serve(async (req) => {
-  // Top-level try-catch to ensure we always return JSON
+  const corsResponse = handleCors(req);
+  if (corsResponse) return corsResponse;
+
+  // Can be triggered by scheduler or directly
+  if (req.method !== 'POST') {
+    return errorResponse('Method not allowed', 405);
+  }
+
+  const startTime = Date.now();
+  let serviceClient;
+  let jobData: JobData | null = null;
+
   try {
-    const corsResponse = handleCors(req);
-    if (corsResponse) return corsResponse;
-
-    // Can be triggered by scheduler or directly
-    if (req.method !== 'POST') {
-      return errorResponse('Method not allowed', 405);
-    }
-
-    const startTime = Date.now();
-    const serviceClient = createServiceClient();
-
-    try {
+    serviceClient = createServiceClient();
     // Check for specific job ID in request body, or claim next pending
     const body = await req.json().catch(() => ({}));
-    let jobData: JobData | null = null;
 
     if (body.jobId) {
       // Process a specific job (either resume processing or claim pending)
@@ -302,11 +301,6 @@ Deno.serve(async (req) => {
     }
 
     return errorResponse('Job processing failed: ' + error.message, 500);
-    }
-  } catch (topLevelError) {
-    // Catch any errors that happen before the main try-catch (imports, env vars, etc.)
-    console.error('Top-level error in process-job:', topLevelError);
-    return errorResponse('Internal error: ' + (topLevelError.message || 'Unknown'), 500);
   }
 });
 
