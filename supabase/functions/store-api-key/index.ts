@@ -1,6 +1,6 @@
 /**
  * Store API Key Edge Function
- * Version: 2026-01-31-v2
+ * Version: 2026-01-31-v3 (inline auth)
  *
  * Implements zero-knowledge key storage using Shamir's Secret Sharing:
  * 1. Receives plaintext API key from authenticated user
@@ -12,6 +12,7 @@
  * Even a database breach only exposes encrypted Share A.
  */
 
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import {
   splitSecret,
   encryptAES,
@@ -19,30 +20,110 @@ import {
   toBase64,
   fromHex,
 } from '../_shared/crypto.ts';
-import {
-  verifyAuthWithDetails,
-  createServiceClient,
-  handleCors,
-  jsonResponse,
-  errorResponse,
-} from '../_shared/supabase.ts';
 
-// Server-side encryption pepper (set in Supabase Dashboard -> Edge Functions -> Secrets)
+// Environment variables
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
+const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const SERVER_PEPPER = Deno.env.get('API_KEY_ENCRYPTION_SECRET');
 
+// CORS headers
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+};
+
+function jsonResponse(data: unknown, status: number = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
+
+function errorResponse(message: string, status: number = 400): Response {
+  return jsonResponse({ error: message }, status);
+}
+
+// Inline auth verification to avoid bundling issues
+async function verifyAuth(req: Request): Promise<{ userId: string; supabase: SupabaseClient } | { error: string; errorCode: string }> {
+  const authHeader = req.headers.get('Authorization');
+  if (!authHeader) {
+    console.log('[store-api-key] No Authorization header');
+    return { error: 'No Authorization header', errorCode: 'NO_AUTH_HEADER' };
+  }
+
+  console.log('[store-api-key] Auth header present, length:', authHeader.length);
+
+  // Extract user ID from token
+  let userId: string | null = null;
+  try {
+    const token = authHeader.replace('Bearer ', '');
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    userId = payload.sub || null;
+    console.log('[store-api-key] Token payload sub:', userId);
+  } catch (e) {
+    console.error('[store-api-key] Failed to decode token:', e);
+    return { error: 'Invalid token format', errorCode: 'INVALID_TOKEN_FORMAT' };
+  }
+
+  if (!userId) {
+    return { error: 'No user ID in token', errorCode: 'NO_USER_ID' };
+  }
+
+  // Check environment
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    console.error('[store-api-key] Missing env vars');
+    return { error: 'Server configuration error', errorCode: 'MISSING_ENV' };
+  }
+
+  // Create client and verify token
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: { headers: { Authorization: authHeader } }
+  });
+
+  console.log('[store-api-key] Calling getUser()...');
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser();
+
+    if (error) {
+      console.error('[store-api-key] getUser error:', error.message);
+      return { error: `Token validation failed: ${error.message}`, errorCode: 'TOKEN_VALIDATION_FAILED' };
+    }
+
+    if (!user) {
+      console.log('[store-api-key] getUser returned no user');
+      return { error: 'User not found', errorCode: 'USER_NOT_FOUND' };
+    }
+
+    console.log('[store-api-key] Auth successful for user:', user.id);
+    return { userId: user.id, supabase };
+  } catch (e) {
+    console.error('[store-api-key] Exception in getUser:', e);
+    return { error: `Exception: ${e.message}`, errorCode: 'EXCEPTION' };
+  }
+}
+
+function createServiceClient(): SupabaseClient {
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false }
+  });
+}
+
 Deno.serve(async (req) => {
-  // Handle CORS
-  const corsResponse = handleCors(req);
-  if (corsResponse) return corsResponse;
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
 
   // Only accept POST
   if (req.method !== 'POST') {
     return errorResponse('Method not allowed', 405);
   }
 
-  // Verify authentication with detailed error reporting
-  const auth = await verifyAuthWithDetails(req);
-  if (!auth.success) {
+  // Verify authentication
+  const auth = await verifyAuth(req);
+  if ('error' in auth) {
     console.error('[store-api-key] Auth failed:', auth.errorCode, auth.error);
     return errorResponse(`Unauthorized: ${auth.error} (${auth.errorCode})`, 401);
   }
@@ -110,8 +191,8 @@ Deno.serve(async (req) => {
         .from('api_keys')
         .update({
           encrypted_data: shareAData,
-          share_a_vault_id: null, // Could use Vault in future
-          share_b_encrypted: null, // Share B stored client-side
+          share_a_vault_id: null,
+          share_b_encrypted: null,
           key_label: label,
           training_opt_out: trainingOptOut,
           min_age_requirement: minAgeRequirement,
@@ -159,7 +240,6 @@ Deno.serve(async (req) => {
     });
 
     // Return Share B to client for local storage
-    // Client will encrypt this with their PIN/Passkey PRF
     return jsonResponse({
       success: true,
       keyId,

@@ -1,6 +1,6 @@
 /**
  * Unlock Session Edge Function
- * Version: 2026-01-31-v2
+ * Version: 2026-01-31-v3 (inline auth)
  *
  * Combines key shares to create a temporary active session:
  * 1. Receives Share B from client (encrypted with PIN/Passkey)
@@ -12,6 +12,7 @@
  * This allows background jobs to use the key without permanent storage.
  */
 
+import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import {
   combineShares,
   decryptAES,
@@ -23,27 +24,109 @@ import {
   fromHex,
   toHex,
 } from '../_shared/crypto.ts';
-import {
-  verifyAuthWithDetails,
-  createServiceClient,
-  handleCors,
-  jsonResponse,
-  errorResponse,
-} from '../_shared/supabase.ts';
 
+// Environment variables
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
+const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const SERVER_PEPPER = Deno.env.get('API_KEY_ENCRYPTION_SECRET');
 const SESSION_SECRET = Deno.env.get('SESSION_ENCRYPTION_SECRET') || SERVER_PEPPER;
 
+// CORS headers
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+};
+
+function jsonResponse(data: unknown, status: number = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
+
+function errorResponse(message: string, status: number = 400): Response {
+  return jsonResponse({ error: message }, status);
+}
+
+// Inline auth verification to avoid bundling issues
+async function verifyAuth(req: Request): Promise<{ userId: string; supabase: SupabaseClient } | { error: string; errorCode: string }> {
+  const authHeader = req.headers.get('Authorization');
+  if (!authHeader) {
+    console.log('[unlock-session] No Authorization header');
+    return { error: 'No Authorization header', errorCode: 'NO_AUTH_HEADER' };
+  }
+
+  console.log('[unlock-session] Auth header present, length:', authHeader.length);
+
+  // Extract user ID from token
+  let userId: string | null = null;
+  try {
+    const token = authHeader.replace('Bearer ', '');
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    userId = payload.sub || null;
+    console.log('[unlock-session] Token payload sub:', userId);
+  } catch (e) {
+    console.error('[unlock-session] Failed to decode token:', e);
+    return { error: 'Invalid token format', errorCode: 'INVALID_TOKEN_FORMAT' };
+  }
+
+  if (!userId) {
+    return { error: 'No user ID in token', errorCode: 'NO_USER_ID' };
+  }
+
+  // Check environment
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    console.error('[unlock-session] Missing env vars');
+    return { error: 'Server configuration error', errorCode: 'MISSING_ENV' };
+  }
+
+  // Create client and verify token
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: { headers: { Authorization: authHeader } }
+  });
+
+  console.log('[unlock-session] Calling getUser()...');
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser();
+
+    if (error) {
+      console.error('[unlock-session] getUser error:', error.message);
+      return { error: `Token validation failed: ${error.message}`, errorCode: 'TOKEN_VALIDATION_FAILED' };
+    }
+
+    if (!user) {
+      console.log('[unlock-session] getUser returned no user');
+      return { error: 'User not found', errorCode: 'USER_NOT_FOUND' };
+    }
+
+    console.log('[unlock-session] Auth successful for user:', user.id);
+    return { userId: user.id, supabase };
+  } catch (e) {
+    console.error('[unlock-session] Exception in getUser:', e);
+    return { error: `Exception: ${e.message}`, errorCode: 'EXCEPTION' };
+  }
+}
+
+function createServiceClient(): SupabaseClient {
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { autoRefreshToken: false, persistSession: false }
+  });
+}
+
 Deno.serve(async (req) => {
-  const corsResponse = handleCors(req);
-  if (corsResponse) return corsResponse;
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders });
+  }
 
   if (req.method !== 'POST') {
     return errorResponse('Method not allowed', 405);
   }
 
-  const auth = await verifyAuthWithDetails(req);
-  if (!auth.success) {
+  const auth = await verifyAuth(req);
+  if ('error' in auth) {
     console.error('[unlock-session] Auth failed:', auth.errorCode, auth.error);
     return errorResponse(`Unauthorized: ${auth.error} (${auth.errorCode})`, 401);
   }
