@@ -16,6 +16,7 @@ import { devLog, devError } from './thinking.js';
 const SUPABASE_URL = 'https://ouvrecllkqtwbtrwyhgw.supabase.co';
 const STORE_KEY_URL = `${SUPABASE_URL}/functions/v1/store-api-key`;
 const UNLOCK_SESSION_URL = `${SUPABASE_URL}/functions/v1/unlock-session`;
+const AUTH_TEST_URL = `${SUPABASE_URL}/functions/v1/auth-test`;
 
 // Note: Job scheduler is triggered by pg_cron (database) or GitHub Actions (backup)
 // Client cannot call scheduler directly as it requires service_role key
@@ -185,81 +186,101 @@ async function authenticatedFetch(url, options = {}) {
 }
 
 /**
- * Diagnostic function to test auth - call from browser console: SimpleSim.testAuth()
+ * Diagnostic function to test auth - call from browser console: testAuth()
  */
 export async function testAuth() {
     console.log('=== AUTH DIAGNOSTIC TEST ===');
+    console.log('Timestamp:', new Date().toISOString());
 
     // Check state
-    console.log('1. State check:');
-    console.log('   - User:', state.user?.id || 'NOT SET');
-    console.log('   - Session:', state.session ? 'SET' : 'NOT SET');
-    console.log('   - Session access_token:', state.session?.access_token ? 'SET (length: ' + state.session.access_token.length + ')' : 'NOT SET');
+    console.log('\n1. Client State Check:');
+    console.log('   - User ID:', state.user?.id || 'NOT SET');
+    console.log('   - Session object:', state.session ? 'SET' : 'NOT SET');
+    console.log('   - Session access_token:', state.session?.access_token ? `SET (length: ${state.session.access_token.length})` : 'NOT SET');
 
     // Get fresh token
-    console.log('\n2. Getting fresh token...');
+    console.log('\n2. Getting Fresh Token...');
     const token = await getFreshAccessToken();
     if (!token) {
         console.error('   FAILED: No token available');
-        return { success: false, error: 'No token' };
+        return { success: false, error: 'No token available' };
     }
     console.log('   Token length:', token.length);
     console.log('   Token preview:', token.substring(0, 50) + '...');
 
-    // Decode token
+    // Decode token client-side
+    console.log('\n3. Client-side Token Decode:');
     try {
         const payload = JSON.parse(atob(token.split('.')[1]));
-        console.log('   Token payload:', payload);
+        console.log('   sub (user ID):', payload.sub);
+        console.log('   aud:', payload.aud);
+        console.log('   role:', payload.role);
+        console.log('   iss:', payload.iss);
         const exp = new Date(payload.exp * 1000);
-        console.log('   Expires:', exp.toISOString());
-        console.log('   Expired:', new Date() > exp);
+        const now = new Date();
+        console.log('   exp:', exp.toISOString());
+        console.log('   now:', now.toISOString());
+        console.log('   expired:', now > exp);
+        console.log('   expires in:', Math.round((exp - now) / 1000), 'seconds');
     } catch (e) {
         console.error('   Failed to decode token:', e.message);
     }
 
-    // Test Edge Function with raw fetch
-    console.log('\n3. Testing Edge Function (raw fetch)...');
-    const testUrl = STORE_KEY_URL.replace('store-api-key', 'store-api-key'); // Same URL
+    // Call the dedicated auth-test Edge Function
+    console.log('\n4. Testing Auth via Edge Function (auth-test)...');
+    console.log('   URL:', AUTH_TEST_URL);
 
     try {
-        const response = await fetch(testUrl, {
+        const response = await fetch(AUTH_TEST_URL, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${token}`
             },
-            body: JSON.stringify({ test: true }) // Will fail validation but auth should pass
+            body: JSON.stringify({ test: true })
         });
 
         console.log('   Response status:', response.status);
-        console.log('   Response headers:', Object.fromEntries(response.headers.entries()));
 
         const body = await response.text();
-        console.log('   Response body:', body);
+        console.log('   Response body (raw):', body);
 
+        let result;
         try {
-            const json = JSON.parse(body);
-            console.log('   Parsed JSON:', json);
+            result = JSON.parse(body);
+            console.log('   Parsed response:', result);
 
-            if (response.status === 401) {
+            if (result.diagnostics) {
+                console.log('\n5. Server-side Diagnostics:');
+                console.log('   Environment:', result.diagnostics.envCheck);
+                console.log('   Auth header received:', result.diagnostics.authHeader);
+                if (result.diagnostics.tokenPayload) {
+                    console.log('   Token payload (server):', result.diagnostics.tokenPayload);
+                }
+                if (result.diagnostics.tokenStatus) {
+                    console.log('   Token status:', result.diagnostics.tokenStatus);
+                }
+                if (result.diagnostics.getUserAttempt) {
+                    console.log('   getUser attempt:', result.diagnostics.getUserAttempt);
+                }
+            }
+
+            if (result.success) {
+                console.log('\n=== AUTH SUCCESS ===');
+                console.log('User:', result.user);
+                return { success: true, user: result.user, diagnostics: result.diagnostics };
+            } else {
                 console.error('\n=== AUTH FAILED ===');
-                console.error('Server error:', json.error);
-                return { success: false, error: json.error, status: 401 };
+                console.error('Error:', result.error);
+                return { success: false, error: result.error, diagnostics: result.diagnostics };
             }
         } catch (e) {
-            console.log('   (Body is not JSON)');
+            console.error('   Failed to parse response:', e.message);
+            return { success: false, error: 'Failed to parse server response', rawBody: body };
         }
-
-        if (response.status === 400) {
-            console.log('\n=== AUTH SUCCESS ===');
-            console.log('Got 400 (expected - test payload invalid), but AUTH PASSED!');
-            return { success: true, status: 400, note: 'Auth passed, request validation failed (expected)' };
-        }
-
-        return { success: response.ok, status: response.status };
     } catch (e) {
-        console.error('   Fetch failed:', e.message);
-        return { success: false, error: e.message };
+        console.error('   Network error:', e.message);
+        return { success: false, error: `Network error: ${e.message}` };
     }
 }
 
