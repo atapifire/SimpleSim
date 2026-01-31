@@ -11,6 +11,7 @@ import {
     initJobQueue,
     submitJob,
     subscribeToJob,
+    setupJobFallback,
     cancelJob,
     checkCompletedJobs,
     getPendingJobs,
@@ -466,6 +467,9 @@ async function checkForPendingJobs() {
 
             showJobProgress(latestJob);
 
+            // Setup fallback timer for pending job
+            const fallbackCleanup = setupJobFallback(latestJob.id, null);
+
             // Subscribe to updates
             state.jobSubscription = subscribeToJob(latestJob.id, {
                 onStatusChange: (status) => {
@@ -473,6 +477,8 @@ async function checkForPendingJobs() {
                         state.currentJob.status = status;
                         updateJobProgressUI(state.currentJob);
                     }
+                    // Notify fallback of status change
+                    fallbackCleanup(status);
                 },
                 onProgress: (progress) => {
                     if (state.currentJob) {
@@ -570,8 +576,14 @@ async function autoQueueCurrentGeneration() {
         // Clear the immediate generation context
         state.immediateGeneration = null;
 
+        // Setup fallback timer for auto-queued job
+        const fallbackCleanup = setupJobFallback(job.id, null);
+
         // Set up subscription for the auto-queued job
         state.jobSubscription = subscribeToJob(job.id, {
+            onStatusChange: (status) => {
+                fallbackCleanup(status);
+            },
             onComplete: async (result) => {
                 devLog('Auto-queued job completed:', result);
                 await loadProject(ctx.projectId, true);
@@ -670,11 +682,18 @@ async function handleSend(isRetry = false) {
             input.style.height = 'auto';
             state.pendingPrompt = null;
 
+            // Setup fallback timer (triggers if job stays pending > 10s)
+            const fallbackCleanup = setupJobFallback(job.id, (status) => {
+                devLog('Fallback received status:', status);
+            });
+
             // Subscribe to job updates
             state.jobSubscription = subscribeToJob(job.id, {
                 onStatusChange: (status) => {
                     job.status = status;
                     updateJobProgressUI(job);
+                    // Notify fallback of status change (clears timer if processing started)
+                    fallbackCleanup(status);
                 },
                 onProgress: (progress) => {
                     job.current_iteration = progress.iteration;

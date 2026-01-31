@@ -805,10 +805,114 @@ export async function submitJob(projectId, prompt, files, options = {}) {
     state.currentJob = job;
     events.dispatchEvent(new CustomEvent('job-submitted', { detail: job }));
 
-    // Jobs are processed by pg_cron (database) or GitHub Actions (backup)
-    // Client subscribes to Realtime for updates
+    // Jobs are processed by:
+    // 1. Database trigger (instant) - via pg_net
+    // 2. pg_cron backup (every minute)
+    // 3. Client fallback (after 10 seconds) - see setupJobFallback()
 
     return job;
+}
+
+/**
+ * Setup client-side fallback for job processing
+ * If job stays in 'pending' status for more than FALLBACK_DELAY_MS,
+ * the client will attempt to trigger processing directly.
+ *
+ * @param {string} jobId - The job ID to monitor
+ * @param {Function} onStatusChange - Callback when status changes (to clear fallback)
+ * @returns {Function} Cleanup function to cancel the fallback
+ */
+const FALLBACK_DELAY_MS = 10000; // 10 seconds
+
+export function setupJobFallback(jobId, onStatusChange) {
+    let fallbackTimer = null;
+    let isProcessing = false;
+
+    // Start fallback timer
+    fallbackTimer = setTimeout(async () => {
+        if (isProcessing) return;
+
+        devLog(`Job ${jobId} still pending after ${FALLBACK_DELAY_MS/1000}s, checking status...`);
+
+        try {
+            // Check current job status
+            const { data: job, error } = await supabase
+                .from('jobs')
+                .select('status')
+                .eq('id', jobId)
+                .single();
+
+            if (error) {
+                devError('Fallback status check failed:', error);
+                return;
+            }
+
+            if (job.status === 'pending') {
+                devLog('Job still pending, triggering manual processing...');
+                isProcessing = true;
+
+                // Call the job-scheduler Edge Function directly
+                // This will pick up the pending job and process it
+                const result = await triggerJobProcessing(jobId);
+
+                if (result.success) {
+                    devLog('Manual job processing triggered successfully');
+                } else {
+                    devError('Manual job processing failed:', result.error);
+                }
+            } else {
+                devLog(`Job already ${job.status}, no fallback needed`);
+            }
+        } catch (err) {
+            devError('Fallback error:', err);
+        }
+    }, FALLBACK_DELAY_MS);
+
+    // Return cleanup function
+    return (newStatus) => {
+        if (newStatus && newStatus !== 'pending') {
+            // Job started processing, clear fallback
+            if (fallbackTimer) {
+                devLog('Job processing started, clearing fallback timer');
+                clearTimeout(fallbackTimer);
+                fallbackTimer = null;
+            }
+        }
+        // Also call the original callback if provided
+        if (onStatusChange) {
+            onStatusChange(newStatus);
+        }
+    };
+}
+
+/**
+ * Manually trigger job processing via Edge Function
+ * Used as a client-side fallback when server-side triggers fail
+ */
+async function triggerJobProcessing(jobId) {
+    const PROCESS_JOB_URL = `${SUPABASE_URL}/functions/v1/process-job`;
+
+    try {
+        const response = await authenticatedFetch(PROCESS_JOB_URL, {
+            method: 'POST',
+            body: JSON.stringify({ jobId })
+        });
+
+        if (!response.ok) {
+            const errorBody = await response.json().catch(() => ({}));
+            return {
+                success: false,
+                error: errorBody.error || errorBody.message || `HTTP ${response.status}`
+            };
+        }
+
+        const result = await response.json();
+        return { success: true, ...result };
+
+    } catch (error) {
+        devError('triggerJobProcessing error:', error);
+        return { success: false, error: error.message };
+    }
 }
 
 /**
