@@ -206,13 +206,13 @@ function setupEventListeners() {
 function injectJobProgressUI() {
     const container = document.createElement('div');
     container.id = 'job-progress-container';
-    container.className = 'fixed bottom-24 left-1/2 -translate-x-1/2 z-40 hidden';
+    container.className = 'fixed bottom-32 sm:bottom-24 left-1/2 -translate-x-1/2 z-40 hidden';
     container.innerHTML = `
-        <div class="bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-2xl shadow-2xl p-4 w-80 max-w-[90vw]">
-            <div class="flex items-center justify-between mb-3">
+        <div class="bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-2xl shadow-2xl p-3 sm:p-4 w-72 sm:w-80 max-w-[90vw]">
+            <div class="flex items-center justify-between mb-2 sm:mb-3">
                 <div class="flex items-center gap-2">
                     <div id="job-status-indicator" class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
-                    <span id="job-status-text" class="text-sm font-medium text-white">Processing...</span>
+                    <span id="job-status-text" class="text-xs sm:text-sm font-medium text-white">Processing...</span>
                 </div>
                 <button id="btn-cancel-job" class="text-gray-400 hover:text-red-400 transition-colors p-1" title="Cancel job">
                     <i class="fa-solid fa-times"></i>

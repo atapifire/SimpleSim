@@ -93,65 +93,69 @@
             </div>
 
             <!-- Main Input Bar -->
-            <div class="bg-gray-800/90 backdrop-blur-lg border border-gray-700 rounded-2xl shadow-2xl p-2 flex items-end gap-2 relative overflow-visible ring-1 ring-white/10 z-10 transition-all duration-300" id="input-bar">
-                
+            <div class="bg-gray-800/90 backdrop-blur-lg border border-gray-700 rounded-2xl shadow-2xl p-2 relative overflow-visible ring-1 ring-white/10 z-10 transition-all duration-300" id="input-bar">
 
-
-                <!-- Utilities (Left) -->
-                <div class="flex flex-col gap-2 pb-1 pr-1">
-                    <div class="flex items-center gap-2">
-                         <button type="button" id="btn-history" class="w-10 h-10 rounded-xl hover:bg-gray-700 text-gray-400 hover:text-white transition-colors flex items-center justify-center relative shrink-0">
-                            <i class="fa-solid fa-code-branch"></i>
-                            <span id="version-badge" class="absolute top-1 right-1 w-2.5 h-2.5 bg-blue-500 rounded-full hidden"></span>
+                <!-- Top Row: Project & Controls -->
+                <div class="flex items-center gap-1.5 sm:gap-2 mb-2">
+                    <!-- Project Selector -->
+                    <div class="flex items-center bg-gray-900/60 rounded-xl border border-gray-700/50 p-0.5 sm:p-1 h-8 sm:h-10 flex-shrink min-w-0">
+                        <button type="button" id="btn-project-label" class="px-2 sm:px-3 h-full flex items-center gap-1 sm:gap-2 text-[11px] sm:text-xs font-medium text-gray-300 hover:text-white transition-colors max-w-[100px] sm:max-w-[160px] rounded hover:bg-white/5">
+                            <span id="current-project-name" class="truncate">New Project</span>
+                            <i class="fa-solid fa-chevron-down text-[8px] sm:text-[10px] opacity-50 shrink-0"></i>
                         </button>
-
-                        <div class="flex items-center bg-gray-900/60 rounded-xl border border-gray-700/50 p-1 h-10">
-                            <button type="button" id="btn-project-label" class="px-3 h-full flex items-center gap-2 text-xs font-medium text-gray-300 hover:text-white transition-colors max-w-[100px] sm:max-w-[140px] rounded hover:bg-white/5">
-                                <span id="current-project-name" class="truncate">New Project</span>
-                                <i class="fa-solid fa-chevron-down text-[10px] opacity-50"></i>
-                            </button>
-                            <div class="w-px h-4 bg-gray-700 mx-1"></div>
-                            <button type="button" id="btn-new-project" class="w-7 h-full flex items-center justify-center rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors" title="New Project">
-                                <i class="fa-solid fa-plus text-xs"></i>
-                            </button>
-                        </div>
+                        <div class="w-px h-3 sm:h-4 bg-gray-700 mx-0.5 sm:mx-1"></div>
+                        <button type="button" id="btn-new-project" class="w-6 sm:w-7 h-full flex items-center justify-center rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors" title="New Project">
+                            <i class="fa-solid fa-plus text-[10px] sm:text-xs"></i>
+                        </button>
                     </div>
-                </div>
 
-                <!-- Input Area -->
-                <div class="flex-1 bg-gray-900/50 rounded-xl border border-gray-700/50 min-h-[48px] flex items-center relative transition-all focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:bg-gray-900">
-                    <textarea id="prompt-input" rows="1" placeholder="Describe your website..." class="w-full bg-transparent text-white placeholder-gray-500 text-sm p-3 pr-44 focus:outline-none resize-none overflow-hidden max-h-32 font-inter leading-relaxed"></textarea>
-
-                    <!-- Project Health Indicator (shows when project has issues) -->
-                    <button type="button" id="btn-health" class="absolute right-[11.5rem] bottom-2 h-8 px-2 rounded-lg text-xs border hidden items-center gap-1.5 transition-colors" title="Project Health">
-                        <i class="fa-solid fa-triangle-exclamation text-[10px]"></i>
-                        <span id="health-label">5k+</span>
+                    <!-- History Button -->
+                    <button type="button" id="btn-history" class="w-8 h-8 sm:w-10 sm:h-10 rounded-xl hover:bg-gray-700 text-gray-400 hover:text-white transition-colors flex items-center justify-center relative shrink-0">
+                        <i class="fa-solid fa-code-branch text-xs sm:text-sm"></i>
+                        <span id="version-badge" class="absolute top-0.5 right-0.5 sm:top-1 sm:right-1 w-2 h-2 sm:w-2.5 sm:h-2.5 bg-blue-500 rounded-full hidden"></span>
                     </button>
 
-                    <!-- Agent Mode Toggle (injected by JS, placeholder position) -->
-                    <!-- Position: right-[7.5rem] -->
+                    <!-- Spacer -->
+                    <div class="flex-1"></div>
 
-                    <!-- Model Selector Chip -->
-                    <button type="button" id="btn-model-selector" class="absolute right-20 bottom-2 h-8 px-3 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white flex items-center gap-1.5 transition-colors text-xs border border-gray-700/50 max-w-[140px]" title="Select Model">
-                        <i id="mode-icon" class="fa-solid fa-bolt text-[10px]"></i>
-                        <span id="model-display" class="truncate">Claude 3.5</span>
+                    <!-- Model Selector -->
+                    <button type="button" id="btn-model-selector" class="h-8 sm:h-10 px-2 sm:px-3 rounded-xl bg-gray-900/60 hover:bg-gray-700 text-gray-400 hover:text-white flex items-center gap-1 sm:gap-1.5 transition-colors text-[11px] sm:text-xs border border-gray-700/50" title="Select Model">
+                        <i id="mode-icon" class="fa-solid fa-bolt text-[9px] sm:text-[10px]"></i>
+                        <span id="model-display" class="truncate max-w-[50px] sm:max-w-[100px]">Claude 3.5</span>
                     </button>
 
                     <!-- Settings Button -->
-                    <button type="button" id="btn-settings" class="absolute right-11 bottom-2 w-8 h-8 rounded-full hover:bg-gray-700 text-gray-400 hover:text-white flex items-center justify-center transition-colors z-10" title="Settings">
-                        <i class="fa-solid fa-cog"></i>
-                    </button>
-
-                    <!-- Voice Input Button (Inside Input) -->
-                    <button type="button" id="btn-mic" class="absolute right-2 bottom-2 w-8 h-8 rounded-full hover:bg-gray-700 text-gray-400 hover:text-white flex items-center justify-center transition-colors">
-                        <i class="fa-solid fa-microphone"></i>
+                    <button type="button" id="btn-settings" class="w-8 h-8 sm:w-10 sm:h-10 rounded-xl hover:bg-gray-700 text-gray-400 hover:text-white flex items-center justify-center transition-colors shrink-0" title="Settings">
+                        <i class="fa-solid fa-cog text-xs sm:text-sm"></i>
                     </button>
                 </div>
 
-                <!-- Action Button (Right) -->
-                <button type="button" id="btn-send" class="w-12 h-12 rounded-xl bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-900/20 flex items-center justify-center transition-all disabled:opacity-50 disabled:cursor-not-allowed pb-0.5">
-                    <i class="fa-solid fa-paper-plane text-lg"></i>
-                </button>
+                <!-- Bottom Row: Input + Send -->
+                <div class="flex items-end gap-1.5 sm:gap-2">
+                    <!-- Input Area -->
+                    <div class="flex-1 bg-gray-900/50 rounded-xl border border-gray-700/50 min-h-[40px] sm:min-h-[48px] flex items-center relative transition-all focus-within:ring-2 focus-within:ring-blue-500/50 focus-within:bg-gray-900">
+                        <textarea id="prompt-input" rows="1" placeholder="Describe your website..." class="w-full bg-transparent text-white placeholder-gray-500 text-sm p-2.5 sm:p-3 pr-20 sm:pr-24 focus:outline-none resize-none overflow-hidden max-h-32 font-inter leading-relaxed"></textarea>
+
+                        <!-- Project Health Indicator -->
+                        <button type="button" id="btn-health" class="absolute right-[4.5rem] sm:right-[5.5rem] bottom-1.5 sm:bottom-2 h-6 sm:h-7 px-1.5 rounded-lg text-[10px] sm:text-xs border hidden items-center gap-1 transition-colors" title="Project Health">
+                            <i class="fa-solid fa-triangle-exclamation text-[9px] sm:text-[10px]"></i>
+                            <span id="health-label" class="hidden sm:inline">5k+</span>
+                        </button>
+
+                        <!-- Agent Mode Toggle (injected by JS) -->
+                        <!-- Mobile: right-[2.5rem], Desktop: right-[3rem] -->
+
+                        <!-- Voice Input Button -->
+                        <button type="button" id="btn-mic" class="absolute right-1.5 sm:right-2 bottom-1.5 sm:bottom-2 w-7 h-7 sm:w-8 sm:h-8 rounded-full hover:bg-gray-700 text-gray-400 hover:text-white flex items-center justify-center transition-colors">
+                            <i class="fa-solid fa-microphone text-xs sm:text-sm"></i>
+                        </button>
+                    </div>
+
+                    <!-- Send Button -->
+                    <button type="button" id="btn-send" class="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-900/20 flex items-center justify-center transition-all disabled:opacity-50 disabled:cursor-not-allowed shrink-0">
+                        <i class="fa-solid fa-paper-plane text-sm sm:text-lg"></i>
+                    </button>
+                </div>
             </div>
         </div>
     </div>

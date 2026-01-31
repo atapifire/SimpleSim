@@ -194,7 +194,8 @@ input:disabled ~ div {
 /* Mobile-Specific Tweaks */
 @media (max-width: 640px) {
     #bottom-bar-container {
-        padding-bottom: env(safe-area-inset-bottom, 20px);
+        padding: 0.5rem;
+        padding-bottom: env(safe-area-inset-bottom, 12px);
     }
 
     /* Hide agent label on very small screens */
@@ -206,5 +207,58 @@ input:disabled ~ div {
         width: 32px;
         padding: 0;
         justify-content: center;
+    }
+
+    /* Compact input bar on mobile */
+    #input-bar {
+        padding: 0.375rem;
+    }
+
+    /* Smaller textarea padding on mobile */
+    #prompt-input {
+        font-size: 14px;
+    }
+
+    /* Project menu adjustments */
+    #project-menu {
+        width: calc(100vw - 2rem);
+        max-width: 280px;
+    }
+
+    /* Model dropdown adjustments */
+    #model-dropdown {
+        width: calc(100vw - 2rem);
+        max-width: 320px;
+        right: 0.5rem !important;
+        left: auto !important;
+    }
+
+    /* History panel full width on mobile */
+    #history-panel {
+        margin-left: 0;
+        margin-right: 0;
+    }
+
+    /* Thinking bar compact */
+    #thinking-container {
+        margin-left: 0.5rem;
+        margin-right: 0.5rem;
+    }
+}
+
+/* Extra small screens (< 380px) */
+@media (max-width: 380px) {
+    /* Even more compact on tiny screens */
+    #current-project-name {
+        max-width: 70px !important;
+    }
+
+    #model-display {
+        max-width: 40px !important;
+    }
+
+    #btn-model-selector {
+        padding-left: 0.375rem;
+        padding-right: 0.375rem;
     }
 }
