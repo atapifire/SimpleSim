@@ -160,17 +160,39 @@ function updateAuthUI() {
 function setupEventListeners() {
     const input = document.getElementById('prompt-input');
     const btnSend = document.getElementById('btn-send');
-    
+
+    // Initialize button state
+    if (btnSend) {
+        btnSend.disabled = true;
+        btnSend.classList.add('opacity-50');
+    }
+
     // Input Auto-resize
     input?.addEventListener('input', () => {
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-        btnSend.disabled = !input.value.trim() || state.isGenerating;
-        btnSend.classList.toggle('opacity-50', btnSend.disabled);
+        const shouldDisable = !input.value.trim() || state.isGenerating;
+        btnSend.disabled = shouldDisable;
+        btnSend.classList.toggle('opacity-50', shouldDisable);
     });
 
-    // Send Handlers
-    btnSend?.addEventListener('click', () => handleSend());
+    // Send Handlers - click works on both desktop and mobile
+    btnSend?.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (!btnSend.disabled) {
+            handleSend();
+        }
+    });
+
+    // Backup touch handler for mobile
+    btnSend?.addEventListener('touchend', (e) => {
+        // Prevent double-firing with click
+        if (e.cancelable) e.preventDefault();
+        if (!btnSend.disabled) {
+            handleSend();
+        }
+    });
+
     input?.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();

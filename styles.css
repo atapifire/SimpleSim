@@ -67,6 +67,8 @@
 /* Smooth textarea expansion */
 #prompt-input {
     transition: height 0.1s ease;
+    -webkit-user-select: text;
+    user-select: text;
 }
 
 /* Active Mic Animation */
@@ -189,6 +191,18 @@ input:disabled ~ div {
     font-size: 10px;
     margin-left: 12px;
     opacity: 0.8;
+}
+
+/* Ensure buttons are touch-friendly on mobile */
+button, [type="button"] {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+}
+
+/* Send button specific - ensure it's always clickable */
+#btn-send {
+    position: relative;
+    z-index: 10;
 }
 
 /* Mobile-Specific Tweaks */
