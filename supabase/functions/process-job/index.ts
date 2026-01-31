@@ -600,10 +600,13 @@ async function runAgentGeneration(
       }
 
       const data = await response.json();
+      console.log(`[process-job] OpenRouter response data:`, JSON.stringify(data).substring(0, 500));
+
       const message = data.choices?.[0]?.message;
 
       if (!message) {
-        throw new Error('Empty response from agent');
+        console.error(`[process-job] No message in response. Full data:`, JSON.stringify(data));
+        throw new Error('Empty response from agent. Check logs for API response.');
       }
 
       const toolCalls = message.tool_calls;
