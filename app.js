@@ -60,6 +60,11 @@ async function init() {
 
     // Expose debug functions globally
     window.testAuth = testAuth;
+    window.supabase = supabase;
+    window.state = state;
+    window.checkJob = (id) => supabase.from('jobs').select('*').eq('id', id).single().then(r => console.log('Job:', r.data, r.error));
+    window.checkSessions = () => supabase.from('active_sessions').select('*').then(r => console.log('Sessions:', r.data, r.error));
+    window.checkJobs = () => supabase.from('jobs').select('id,status,created_at,user_id').order('created_at', {ascending:false}).limit(10).then(r => console.log('Jobs:', r.data, r.error));
 
     // Setup health indicator
     setupHealthIndicator();
