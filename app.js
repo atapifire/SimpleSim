@@ -226,6 +226,27 @@ function setupEventListeners() {
     events.addEventListener('retry-generation', () => {
         if (state.pendingPrompt) handleSend(true);
     });
+
+    // Auto-queue on page visibility change (for immediate mode)
+    document.addEventListener('visibilitychange', async () => {
+        if (document.hidden && state.immediateGeneration) {
+            devLog('Page hidden during immediate generation - auto-queueing job');
+            try {
+                await autoQueueCurrentGeneration();
+            } catch (error) {
+                devError('Failed to auto-queue:', error);
+            }
+        }
+    });
+
+    // Warn user if leaving during generation
+    window.addEventListener('beforeunload', (e) => {
+        if (state.isGenerating || state.currentJob) {
+            e.preventDefault();
+            e.returnValue = 'Generation in progress. Your work may be lost if you leave.';
+            return e.returnValue;
+        }
+    });
 }
 
 // --- Job Progress UI ---
@@ -512,6 +533,55 @@ function hasServerKeyConfigured() {
     return state.settings.hasServerKey && hasServerKey();
 }
 
+/**
+ * Auto-queue the current immediate generation when user leaves page
+ * Called by visibilitychange handler when page becomes hidden during immediate mode
+ */
+async function autoQueueCurrentGeneration() {
+    const ctx = state.immediateGeneration;
+    if (!ctx) {
+        devLog('No immediate generation context to queue');
+        return;
+    }
+
+    // Only queue if we have server key capability
+    if (!hasServerKeyConfigured() || !state.sessionUnlocked) {
+        devLog('Cannot auto-queue: server key not configured or session not unlocked');
+        return;
+    }
+
+    devLog('Auto-queueing generation:', ctx.prompt.slice(0, 50) + '...');
+
+    try {
+        // Submit the job to background queue
+        const job = await submitJob(ctx.projectId, ctx.prompt, ctx.files, {
+            isAgent: ctx.isAgent,
+            maxIterations: 10
+        });
+
+        showToast('Job auto-queued - will continue in background');
+        devLog('Auto-queued job:', job.id);
+
+        // Clear the immediate generation context
+        state.immediateGeneration = null;
+
+        // Set up subscription for the auto-queued job
+        state.jobSubscription = subscribeToJob(job.id, {
+            onComplete: async (result) => {
+                devLog('Auto-queued job completed:', result);
+                await loadProject(ctx.projectId, true);
+            },
+            onError: (error) => {
+                devError('Auto-queued job failed:', error);
+            }
+        });
+
+    } catch (error) {
+        devError('Failed to auto-queue generation:', error);
+        // Don't clear context - maybe user comes back and it can retry
+    }
+}
+
 async function handleSend(isRetry = false) {
     const input = document.getElementById('prompt-input');
     const prompt = isRetry ? state.pendingPrompt : input.value.trim();
@@ -531,7 +601,10 @@ async function handleSend(isRetry = false) {
         // Server key mode - check session is unlocked
         if (!state.sessionUnlocked) {
             state.pendingPrompt = prompt;
-            startPinFlow('unlock-session', "Unlock Session for Background Jobs");
+            const unlockTitle = state.settings.useBackgroundJobs
+                ? "Unlock Session for Background Jobs"
+                : "Unlock Session to Generate";
+            startPinFlow('unlock-session', unlockTitle);
             return;
         }
     } else {
@@ -651,14 +724,28 @@ async function handleSend(isRetry = false) {
         return;
     }
 
-    // Synchronous mode (fallback when no server key configured)
-    devLog('Using SYNCHRONOUS mode');
+    // Synchronous/Immediate mode - process on-device
+    // If server key is configured but toggle is OFF, this enables auto-queue fallback
+    const isImmediateMode = useServerKey && !state.settings.useBackgroundJobs;
+    devLog(isImmediateMode ? 'Using IMMEDIATE mode (with auto-queue fallback)' : 'Using SYNCHRONOUS mode');
 
     const loadingText = state.projectId
         ? (useAgent ? "Agent refining project..." : "Refining project...")
         : (useAgent ? "Agent creating project..." : "Architecting new project...");
 
     setLoading(true, loadingText);
+
+    // Track immediate generation context for auto-queue fallback
+    if (isImmediateMode) {
+        state.immediateGeneration = {
+            projectId: state.projectId,
+            prompt,
+            files: currentFiles,
+            isAgent: useAgent,
+            startedAt: Date.now()
+        };
+        devLog('Immediate mode context set - will auto-queue if user leaves');
+    }
 
     try {
         if (!state.projectId) {
@@ -744,6 +831,9 @@ async function handleSend(isRetry = false) {
         const modeLabel = useAgent ? `Agent completed in ${result.iterations || 1} iteration(s)` : 'Version generated';
         showToast(modeLabel);
 
+        // Clear immediate generation context on success
+        state.immediateGeneration = null;
+
         devLog('Generation complete - project:', state.projectId, 'versions:', state.versions.length);
 
     } catch (error) {
@@ -803,6 +893,8 @@ async function handleSend(isRetry = false) {
     } finally {
         setLoading(false);
         thinking.hide(); // Ensure thinking UI is hidden
+        // Clear immediate generation context - generation is done (success or fail)
+        state.immediateGeneration = null;
     }
 }
 

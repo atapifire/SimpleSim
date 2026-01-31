@@ -21,6 +21,7 @@ export const state = {
     projects: [],
     currentVersionIndex: -1,
     isGenerating: false,
+    immediateGeneration: null, // Tracks immediate mode generation context for auto-queue fallback
     historyOpen: false,
     projectMenuOpen: false,
     versionUnsubscribe: null,

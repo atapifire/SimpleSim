@@ -110,7 +110,10 @@ const SETTINGS_MODAL_HTML = `
                         </div>
                     </div>
                     <label class="flex items-center justify-between cursor-pointer">
-                        <span class="text-sm text-gray-300">Use background jobs by default</span>
+                        <div>
+                            <span class="text-sm text-gray-300">Always use background queue</span>
+                            <p class="text-xs text-gray-500 mt-0.5">OFF = process on-device (faster, auto-queues if you leave)</p>
+                        </div>
                         <input type="checkbox" id="use-background-jobs" class="w-4 h-4 rounded bg-gray-800 border-gray-700 text-purple-600 focus:ring-purple-500" checked>
                     </label>
                 </div>
