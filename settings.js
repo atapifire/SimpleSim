@@ -1,4 +1,4 @@
-import { state } from './state.js';
+import { state, events } from './state.js';
 import { security } from './security.js';
 import { showToast } from './utils.js';
 import { initSecurityModal, startPinFlow as _startPinFlow } from './security-modal.js';
@@ -339,9 +339,9 @@ function setupListeners() {
         showToast("Session locked");
     });
 
-    // Listen for session events
-    window.addEventListener('session-unlocked', updateUI);
-    window.addEventListener('session-expired', updateUI);
+    // Listen for session events (use events from state.js, not window)
+    events.addEventListener('session-unlocked', updateUI);
+    events.addEventListener('session-expired', updateUI);
 }
 
 export function updateUI() {

@@ -506,6 +506,33 @@ function setupJobEventListeners() {
         const warning = document.getElementById('job-session-warning');
         if (warning) warning.classList.add('hidden');
         devLog('Session unlocked');
+
+        // Retry pending prompt if there was one
+        if (state.pendingPrompt) {
+            devLog('Retrying pending prompt after session unlock');
+            handleSend(true);
+        }
+    });
+
+    // Handle early job failures (detected by fallback timer before Realtime catches it)
+    events.addEventListener('job-failed-early', (e) => {
+        const { jobId, error, logs } = e.detail;
+        devError('Job failed early:', jobId, error);
+
+        // Update logs if available
+        if (logs) {
+            updateJobLogs(logs);
+        }
+
+        // Clean up job state
+        hideJobProgress();
+        if (state.currentJob?.id === jobId) {
+            state.currentJob = null;
+        }
+        clearLastJobProjectId();
+
+        // Show error to user
+        showToast('Job failed: ' + error);
     });
 }
 

@@ -860,6 +860,31 @@ export function setupJobFallback(jobId, onStatusChange) {
                 } else {
                     devError('Manual job processing failed:', result.error);
                 }
+            } else if (job.status === 'failed') {
+                // Job already failed - fetch full job to get error message
+                devLog('Job already failed, fetching error details...');
+                const { data: failedJob } = await supabase
+                    .from('jobs')
+                    .select('error_message, processing_log')
+                    .eq('id', jobId)
+                    .single();
+
+                const errorMsg = failedJob?.error_message || 'Unknown error';
+                devError('Job failed:', errorMsg);
+
+                // Notify via callback if provided
+                if (onStatusChange) {
+                    onStatusChange('failed');
+                }
+
+                // Dispatch a custom event so subscriptions can handle it
+                events.dispatchEvent(new CustomEvent('job-failed-early', {
+                    detail: {
+                        jobId,
+                        error: errorMsg,
+                        logs: failedJob?.processing_log
+                    }
+                }));
             } else {
                 devLog(`Job already ${job.status}, no fallback needed`);
             }
@@ -976,7 +1001,48 @@ export function subscribeToJob(jobId, callbacks = {}) {
                 }
             }
         )
-        .subscribe();
+        .subscribe(async (status) => {
+            // Once subscribed, check current job status to catch fast failures
+            if (status === 'SUBSCRIBED') {
+                try {
+                    const { data: job } = await supabase
+                        .from('jobs')
+                        .select('status, error_message, processing_log, result_files, result_description, result_version_id, current_iteration, max_iterations, job_type, model_info')
+                        .eq('id', jobId)
+                        .single();
+
+                    if (job) {
+                        devLog('Initial job status check:', job.status);
+
+                        // If job already completed or failed, handle immediately
+                        if (job.status === 'completed') {
+                            onStatusChange(job.status);
+                            onComplete({
+                                files: job.result_files,
+                                description: job.result_description,
+                                versionId: job.result_version_id,
+                                iterations: job.current_iteration,
+                                processingLog: job.processing_log,
+                                modelInfo: job.model_info
+                            });
+                            channel.unsubscribe();
+                        } else if (job.status === 'failed') {
+                            onStatusChange(job.status);
+                            onError(new Error(job.error_message || 'Job failed'), job.processing_log);
+                            channel.unsubscribe();
+                        } else if (job.status === 'processing') {
+                            // Job is processing, update UI
+                            onStatusChange(job.status);
+                            if (job.processing_log) {
+                                onLog(job.processing_log, job.model_info);
+                            }
+                        }
+                    }
+                } catch (err) {
+                    devError('Failed to fetch initial job status:', err);
+                }
+            }
+        });
 
     return () => {
         devLog('Unsubscribing from job:', jobId);
