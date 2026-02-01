@@ -29,8 +29,9 @@ const SESSION_SECRET = Deno.env.get('SESSION_ENCRYPTION_SECRET') ||
                        Deno.env.get('API_KEY_ENCRYPTION_SECRET');
 
 // Timeout safety margin (stop 30s before function timeout)
-const MAX_EXECUTION_MS = 120000; // 2 minutes
-const AGENT_ITERATION_TIMEOUT_MS = 25000; // 25s per iteration
+// Supabase Edge Functions have a 150s limit, we use 120s max
+const MAX_EXECUTION_MS = 120000; // 2 minutes total
+const AGENT_ITERATION_TIMEOUT_MS = 60000; // 60s per iteration (free models are slower)
 
 // ============================================
 // Verbose Logging Helper
