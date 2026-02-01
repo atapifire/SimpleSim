@@ -712,6 +712,8 @@ const AGENT_TOOLS = [
 ];
 
 Deno.serve(async (req) => {
+  console.log('[process-job] Request received:', req.method, req.url);
+
   const corsResponse = handleCors(req);
   if (corsResponse) return corsResponse;
 
@@ -724,8 +726,28 @@ Deno.serve(async (req) => {
   let serviceClient;
   let jobData: JobData | null = null;
 
+  // Log auth header info (not the actual token)
+  const authHeader = req.headers.get('Authorization');
+  console.log('[process-job] Auth header present:', !!authHeader);
+  if (authHeader) {
+    try {
+      const token = authHeader.replace('Bearer ', '');
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(atob(parts[1]));
+        console.log('[process-job] Token type:', payload.role || 'unknown');
+        console.log('[process-job] Token sub:', payload.sub || 'none');
+        console.log('[process-job] Token iss:', payload.iss || 'unknown');
+      }
+    } catch (e) {
+      console.log('[process-job] Could not parse token');
+    }
+  }
+
   try {
+    console.log('[process-job] Creating service client...');
     serviceClient = createServiceClient();
+    console.log('[process-job] Service client created');
     // Check for specific job ID in request body, or claim next pending
     const body = await req.json().catch(() => ({}));
 
@@ -814,11 +836,21 @@ Deno.serve(async (req) => {
     });
 
     // Get the user's API key from active session
-    await logger.info('Retrieving API key from session');
-    const apiKey = await getApiKeyFromSession(serviceClient, jobData.user_id);
+    await logger.info('Retrieving API key from session', { user_id: jobData.user_id });
+    console.log('[process-job] Getting API key for user:', jobData.user_id);
+
+    let apiKey: string | null = null;
+    try {
+      apiKey = await getApiKeyFromSession(serviceClient, jobData.user_id);
+      console.log('[process-job] getApiKeyFromSession result:', apiKey ? 'key found' : 'no key');
+    } catch (sessionError) {
+      console.error('[process-job] getApiKeyFromSession threw error:', sessionError);
+      throw sessionError;
+    }
 
     if (!apiKey) {
       await logger.error('No API key found in session');
+      console.log('[process-job] Failing job - no API key');
       await serviceClient.rpc('fail_job', {
         p_job_id: jobData.id,
         p_error_message: 'No active session. Please unlock your API key first.',
@@ -882,19 +914,24 @@ Deno.serve(async (req) => {
     });
 
   } catch (error) {
-    console.error('Job processing error:', error);
-    console.error('Error stack:', error.stack);
+    console.error('[process-job] JOB PROCESSING ERROR:', error);
+    console.error('[process-job] Error message:', error.message);
+    console.error('[process-job] Error name:', error.name);
+    console.error('[process-job] Error stack:', error.stack);
+    console.error('[process-job] Error stringified:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
 
     // Mark the job as failed if we have a job ID
     if (jobData?.id) {
+      const errorMessage = error.message || 'Unknown error during job processing';
+      console.log(`[process-job] Marking job ${jobData.id} as failed with message: ${errorMessage}`);
       try {
         await serviceClient.rpc('fail_job', {
           p_job_id: jobData.id,
-          p_error_message: error.message || 'Unknown error during job processing',
+          p_error_message: errorMessage,
         });
-        console.log(`Job ${jobData.id} marked as failed`);
+        console.log(`[process-job] Job ${jobData.id} marked as failed`);
       } catch (failError) {
-        console.error('Failed to mark job as failed:', failError);
+        console.error('[process-job] Failed to mark job as failed:', failError);
       }
     }
 
