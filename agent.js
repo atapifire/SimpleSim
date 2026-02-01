@@ -13,6 +13,13 @@ import { getApiKey } from './job-queue.js';
 import { getModelProfile, getPromptStyle } from './model-profiles.js';
 import { applyEdits, validateEdits, validateFileSyntax, validateAndRepairFiles } from './file-ops.js';
 import { TECHNICAL_GUIDELINES, getLibraryInstructions } from './protocol-data.js';
+import {
+    buildAgentSystemPrompt as buildAgentSystemPromptBase,
+    buildAgentUserMessage,
+    TECHNOLOGY_STACK,
+    IMAGE_HANDLING,
+    INTERACTIVE_FEATURES
+} from './prompts.js';
 
 // Agent configuration
 const MAX_ITERATIONS = 10;
@@ -228,6 +235,98 @@ const TOOLS = [
 ];
 
 /**
+ * Validate the project before allowing finish
+ * Ensures we have a complete, working website
+ */
+function validateProjectBeforeFinish() {
+    const issues = [];
+
+    // 1. Check if index.html exists
+    const indexFile = workingFiles.find(f => f.path === 'index.html' || f.path === './index.html');
+    if (!indexFile) {
+        issues.push('index.html is missing - this is required as the main entry point');
+        return {
+            valid: false,
+            issues,
+            hint: 'Create index.html with write_file before calling finish'
+        };
+    }
+
+    // 2. Check if index.html has meaningful content (not just the starter template)
+    const indexContent = indexFile.content;
+    const contentLength = indexContent.length;
+    const hasBody = /<body[^>]*>[\s\S]*<\/body>/i.test(indexContent);
+    const hasContent = indexContent.includes('<h1') || indexContent.includes('<main') ||
+                       indexContent.includes('<section') || indexContent.includes('<div class');
+
+    if (contentLength < 500 || !hasBody || !hasContent) {
+        issues.push('index.html appears to have minimal content - ensure you\'ve added the requested features');
+    }
+
+    // 3. Validate HTML syntax
+    const htmlValidation = validateFileSyntax('index.html', indexContent);
+    if (!htmlValidation.valid) {
+        issues.push(`index.html has syntax errors: ${htmlValidation.error}`);
+    }
+
+    // 4. Check for referenced files that don't exist
+    const cssLinks = indexContent.match(/href=["']([^"']+\.css)["']/gi) || [];
+    const jsScripts = indexContent.match(/src=["']([^"']+\.js)["']/gi) || [];
+
+    for (const link of cssLinks) {
+        const path = link.match(/["']([^"']+)["']/)[1];
+        // Skip external URLs
+        if (path.startsWith('http') || path.startsWith('//')) continue;
+        const exists = workingFiles.some(f => f.path === path || f.path === `./${path}`);
+        if (!exists) {
+            issues.push(`CSS file referenced but not found: ${path}`);
+        }
+    }
+
+    for (const script of jsScripts) {
+        const path = script.match(/["']([^"']+)["']/)[1];
+        // Skip external URLs and CDN scripts
+        if (path.startsWith('http') || path.startsWith('//')) continue;
+        const exists = workingFiles.some(f => f.path === path || f.path === `./${path}`);
+        if (!exists) {
+            issues.push(`JS file referenced but not found: ${path}`);
+        }
+    }
+
+    // 5. Validate other files in the project
+    for (const file of workingFiles) {
+        if (file.path === 'index.html') continue;
+
+        const validation = validateFileSyntax(file.path, file.content);
+        if (!validation.valid) {
+            issues.push(`${file.path} has syntax errors: ${validation.error}`);
+        }
+    }
+
+    // Allow warnings but require no critical issues
+    const criticalIssues = issues.filter(i =>
+        i.includes('missing') ||
+        i.includes('syntax errors') ||
+        i.includes('not found')
+    );
+
+    if (criticalIssues.length > 0) {
+        return {
+            valid: false,
+            issues: criticalIssues,
+            hint: 'Fix these issues before calling finish'
+        };
+    }
+
+    // Log warnings but allow finish
+    if (issues.length > 0) {
+        devLog('Finish validation warnings:', issues);
+    }
+
+    return { valid: true, warnings: issues };
+}
+
+/**
  * Execute a tool call
  * Enhanced with edit_file, read_file_section, and validate_file
  */
@@ -393,6 +492,19 @@ function executeTool(name, args) {
         }
 
         case 'finish': {
+            // Pre-finish validation: ensure we have a complete, valid project
+            const validation = validateProjectBeforeFinish();
+
+            if (!validation.valid) {
+                devLog('Finish validation failed:', validation.issues);
+                return {
+                    success: false,
+                    error: 'Cannot finish yet - project incomplete',
+                    issues: validation.issues,
+                    hint: validation.hint
+                };
+            }
+
             return { success: true, finished: true, summary: args.summary };
         }
 
@@ -403,115 +515,71 @@ function executeTool(name, args) {
 
 /**
  * Build the agent system prompt with model-specific optimizations
+ * Uses the unified prompts.js system with agent-specific enhancements
  */
 function buildAgentSystemPrompt(isNewProject, modelProfile, userPrompt = '') {
-    const mode = isNewProject ? 'CREATE' : 'MODIFY';
+    const modelId = modelProfile?.modelId || state.settings.openRouterModel;
     const style = modelProfile?.promptStyle || 'markdown';
+    const mode = isNewProject ? 'CREATE' : 'MODIFY';
 
-    // Critical rules for all models (especially important for weaker models)
-    const criticalRules = `
-CRITICAL RULES - YOU MUST FOLLOW THESE:
-1. This is a STATIC WEBSITE builder. You create web projects.
-2. index.html MUST exist - it is the main entry point. NEVER delete it.
-3. You may create any file types needed (.html, .css, .js, .json, .txt, .md, etc.)
-4. The main content should be in index.html - users see this first.
-5. No server-side code (no PHP, Python, etc.) - static files only.
-6. Don't ask questions - the user cannot see your questions.`;
+    // Get the base agent system prompt from prompts.js
+    let systemPrompt = buildAgentSystemPromptBase(modelId);
 
-    // Base tool documentation
-    const toolDocs = `
-- read_file(path): Read a file's content
-- read_file_section(path, start_line, end_line): Read specific lines (for large files)
-- write_file(path, content): Create or overwrite a file
-- edit_file(path, edits): Make surgical changes using search/replace
-- delete_file(path): Remove a file
-- list_files(): See all project files with sizes
-- search_files(query): Find text across files
-- validate_file(path): Check if file syntax is valid
-- finish(summary): Complete the task`;
+    // Add mode-specific workflow instructions
+    const workflowInstructions = isNewProject
+        ? `
+WORKFLOW FOR NEW PROJECT:
+1. Read the starter index.html template first (read_file)
+2. Plan what files you need: index.html (required), styles.css, script.js
+3. Build the complete site - don't stop after just one file
+4. Use write_file for new files, edit_file for modifications
+5. Validate each file after creating/editing (validate_file)
+6. Ensure the project is COMPLETE before calling finish()`
+        : `
+WORKFLOW FOR MODIFICATIONS:
+1. Use list_files() to see current project structure
+2. Read relevant files to understand current state
+3. Plan your changes - what files need modification?
+4. Use edit_file for small changes, write_file for major rewrites
+5. Validate changes with validate_file
+6. Call finish() only when ALL requested changes are complete`;
 
-    // Efficiency rules
-    const efficiencyRules = `
-EFFICIENCY RULES:
-1. Use read_file_section for large files (>200 lines) - read only what you need
-2. Use edit_file for small changes - avoids full file rewrites
-3. Use write_file only for new files or complete rewrites
-4. Call validate_file after making changes to verify syntax
-5. Call list_files first to understand project structure
-
-CHANGE STRATEGY:
-- Small change (<10 lines): Use edit_file with search/replace
-- Medium change (10-50 lines): Use edit_file with multiple edits
-- Large change (>50 lines or structural): Use write_file`;
-
-    // Requirements (same for all)
-    const requirements = `
-REQUIREMENTS:
-- index.html MUST be the main page (REQUIRED - never delete)
-- Use Twind (Tailwind-compatible): <script src="https://cdn.twind.style" crossorigin></script>
-- Write clean, semantic HTML5
-- Use vanilla JavaScript (no frameworks)
-- Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs (NO base64 data URLs)
-- Make it mobile-responsive
-- Keep individual files under 200 lines when practical`;
-
-    // Get context-aware technical guidelines
+    // Add context-aware technical notes
     const technicalNotes = buildAgentTechnicalNotes(userPrompt);
 
-    // Model-specific formatting
-    if (style === 'xml-tags') {
-        // Claude-optimized prompt
-        return `<role>You are an expert Frontend Developer agent building STATIC WEBSITES.</role>
+    // Completion requirements - CRITICAL for preventing partial output
+    const completionRequirements = `
+COMPLETION REQUIREMENTS (CRITICAL):
+- finish() will FAIL if index.html is missing or empty
+- finish() will FAIL if referenced CSS/JS files don't exist
+- You must create a COMPLETE, working website
+- For any request beyond basic text, create separate styles.css and script.js
+- Do NOT call finish() until you've created all necessary files`;
 
-<critical>${criticalRules}</critical>
+    // Build the final prompt based on style
+    if (style === 'xml-tags') {
+        systemPrompt += `
 
 <mode>${mode}</mode>
 
-<tools>${toolDocs}
-</tools>
-
-<workflow>
-1. ${isNewProject ? 'Read index.html to see the starter template, then build on it' : 'Use list_files() to understand the project, then read_file() for specific files'}
-2. Use edit_file to modify index.html with the requested content
-3. Add styles.css and script.js if needed
-4. Validate changes with validate_file
-5. Call finish() with a summary when done
+<workflow>${workflowInstructions}
 </workflow>
-${efficiencyRules}
-${requirements}
-${technicalNotes ? `\n<technical_notes>${technicalNotes}</technical_notes>` : ''}
-<important>
-- Make changes incrementally
-- index.html MUST remain as the main entry point
-- Preserve existing functionality unless asked to change
-- Call finish() ONLY when ALL changes are complete
-</important>`;
-    }
 
-    // Default markdown-style prompt (GPT, Gemini, Llama, etc.)
-    return `You are an expert Frontend Developer agent building STATIC WEBSITES.
-
-${criticalRules}
+<completion_requirements>${completionRequirements}
+</completion_requirements>
+${technicalNotes ? `\n<context_specific>\n${technicalNotes}\n</context_specific>` : ''}`;
+    } else {
+        systemPrompt += `
 
 ### Mode: ${mode}
+${workflowInstructions}
 
-### Available Tools
-${toolDocs}
+### Completion Requirements
+${completionRequirements}
+${technicalNotes ? `\n### Context-Specific Guidelines\n${technicalNotes}` : ''}`;
+    }
 
-### Workflow
-1. ${isNewProject ? 'Read index.html to see the starter template, then build on it' : 'Use list_files() to understand the project, then read_file() for specific files'}
-2. Use edit_file to modify index.html with the requested content
-3. Add styles.css and script.js if needed
-4. Validate changes with validate_file
-5. Call finish() with a summary when done
-${efficiencyRules}
-${requirements}
-${technicalNotes ? `\n### Technical Notes\n${technicalNotes}` : ''}
-### Important
-- Make changes incrementally
-- index.html MUST remain as the main entry point
-- Preserve existing functionality unless asked to change
-- Call finish() ONLY when ALL changes are complete`;
+    return systemPrompt;
 }
 
 /**

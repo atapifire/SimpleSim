@@ -28,6 +28,14 @@ import {
     getLibraryInstructions,
     enhancePromptWithProtocol
 } from './protocol-data.js';
+import {
+    buildNewProjectSystemPrompt,
+    buildRevisionSystemPrompt,
+    buildNewProjectUserMessage,
+    buildRevisionUserMessage,
+    VERIFICATION_CHECKLIST,
+    getModelSpecificInstructions
+} from './prompts.js';
 
 // Timeout for API requests (3 minutes for streaming)
 const API_TIMEOUT = 180000;
@@ -210,79 +218,32 @@ RULES:
 
 /**
  * Build system prompt for new projects with model-specific optimizations
+ * Uses the unified prompts.js system with context-aware enhancements
  */
 function buildNewProjectPrompt(modelProfile, userPrompt = '') {
-    const style = modelProfile?.promptStyle || 'markdown';
+    const modelId = modelProfile?.modelId || state.settings.openRouterModel;
 
-    // Critical rules for all models (especially important for weaker models)
-    const criticalRules = `
-CRITICAL RULES (MUST FOLLOW):
-1. This is a STATIC WEBSITE builder - you create web projects
-2. index.html is REQUIRED - it is the main entry point that users see first
-3. You may create any file types needed (.html, .css, .js, .json, .txt, .md, etc.)
-4. The main content should be in index.html - other files support it
-5. Don't ask questions - the user cannot see your questions`;
+    // Get the base system prompt from prompts.js
+    let systemPrompt = buildNewProjectSystemPrompt(modelId);
 
-    // Base requirements (same for all models)
-    const requirements = `
-REQUIREMENTS:
-- index.html MUST be included (REQUIRED - main page)
-- Use Twind (Tailwind-compatible): <script src="https://cdn.twind.style" crossorigin></script>
-- Write clean, semantic HTML5
-- Use vanilla JavaScript (no frameworks)
-- Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs (NO base64 data URLs)
-- Make it mobile-responsive
-- Include basic interactivity where appropriate
-- Keep files under 200 lines each when possible`;
-
-    // Get context-aware technical guidelines
+    // Add context-aware technical guidelines based on user prompt
     const technicalNotes = buildTechnicalNotes(userPrompt);
-
-    // Model-specific prompt formatting
-    if (style === 'xml-tags') {
-        // Claude-optimized prompt with XML tags
-        return `<role>You are an expert Frontend Developer. Create a complete STATIC WEBSITE.</role>
-
-<critical>${criticalRules}</critical>
-
-<output_format>
-Return ONLY valid JSON matching this schema:
-{
-  "files": [
-    { "path": "index.html", "content": "<!DOCTYPE html>..." },
-    { "path": "styles.css", "content": "/* CSS */" },
-    { "path": "script.js", "content": "// JavaScript" }
-  ],
-  "description": "Brief description (max 10 words)"
-}
-</output_format>
-
-<requirements>${requirements}
-</requirements>
-${technicalNotes ? `\n<technical_notes>${technicalNotes}</technical_notes>` : ''}
-<important>Output ONLY the JSON object. No markdown code blocks, no explanation. index.html is REQUIRED.</important>`;
+    if (technicalNotes) {
+        const style = modelProfile?.promptStyle || 'markdown';
+        if (style === 'xml-tags') {
+            systemPrompt += `\n\n<context_specific>\n${technicalNotes}\n</context_specific>`;
+        } else {
+            systemPrompt += `\n\n### Context-Specific Guidelines\n${technicalNotes}`;
+        }
     }
 
-    // Default markdown-style prompt (GPT, Gemini, Llama, etc.)
-    return `You are an expert Frontend Developer. Create a complete STATIC WEBSITE.
+    // Add extra emphasis for models with lower JSON reliability
+    const jsonReliability = modelProfile?.jsonReliability || 'medium';
+    if (jsonReliability === 'low' || jsonReliability === 'medium') {
+        systemPrompt += `\n\nREMINDER: You MUST create at least index.html with complete content. For anything beyond basic text, also create styles.css and script.js. Return ONLY valid JSON.`;
+    }
 
-${criticalRules}
-
-### Output Format
-Return **ONLY** valid JSON (no markdown, no code blocks):
-\`\`\`
-{
-  "files": [
-    { "path": "index.html", "content": "<!DOCTYPE html>..." },
-    { "path": "styles.css", "content": "/* CSS */" },
-    { "path": "script.js", "content": "// JavaScript" }
-  ],
-  "description": "Brief description (max 10 words)"
-}
-\`\`\`
-${requirements}
-${technicalNotes ? `\n### Technical Notes\n${technicalNotes}` : ''}
-**IMPORTANT**: Output ONLY the JSON object. No explanation. index.html is REQUIRED.`;
+    return systemPrompt;
 }
 
 /**
@@ -327,119 +288,56 @@ function buildTechnicalNotes(prompt) {
 
 /**
  * Build system prompt for revisions - uses efficient edit format with model-specific optimizations
+ * Uses the unified prompts.js system
  */
 function buildRevisionPrompt(currentFiles, health, modelProfile, userPrompt = '') {
+    const modelId = modelProfile?.modelId || state.settings.openRouterModel;
     const style = modelProfile?.promptStyle || 'markdown';
     const useEditFormat = modelProfile?.preferEditFormat !== false;
 
+    // Get the base revision system prompt from prompts.js
+    let systemPrompt = buildRevisionSystemPrompt(modelId, useEditFormat);
+
+    // Add file list to the prompt
     const fileList = currentFiles.map(f => {
         const tokens = estimateTokens(f.content);
         const status = tokens >= 5000 ? ' [LARGE]' : '';
         return `- ${f.path} (${formatTokenCount(tokens)} tokens)${status}`;
     }).join('\n');
 
-    // Edit format instructions (for models that support it well)
-    const editFormatInstructions = useEditFormat ? `
-For SMALL changes (under 10 lines), use "edit" action with search/replace:
-{
-  "path": "styles.css",
-  "action": "edit",
-  "edits": [
-    { "search": "color: red;", "replace": "color: blue;" },
-    { "search": "font-size: 14px;", "replace": "font-size: 16px;" }
-  ]
-}
+    const fileListSection = style === 'xml-tags'
+        ? `\n<current_files>\n${fileList}\nTotal: ${formatTokenCount(health.totalTokens)} tokens\n</current_files>`
+        : `\n\n### Current Project Files\n${fileList}\nTotal: ${formatTokenCount(health.totalTokens)} tokens`;
 
-SEARCH/REPLACE RULES:
-- Search strings must be UNIQUE in the file
-- Include 1-2 lines of context if needed for uniqueness
-- Search must match EXACTLY (including whitespace)
-- Don't ask questions - the user cannot see your questions
-` : '';
+    systemPrompt += fileListSection;
 
-    // Get context-aware technical guidelines
+    // Add context-aware technical guidelines
     const technicalNotes = buildTechnicalNotes(userPrompt);
-
-    // Model-specific prompt formatting
-    if (style === 'xml-tags') {
-        // Claude-optimized prompt with XML tags
-        return `<role>You are an expert Frontend Developer. Modify an existing website based on the user's request.</role>
-
-<project_files>
-${fileList}
-Total: ${formatTokenCount(health.totalTokens)} tokens
-</project_files>
-
-<output_format>
-Return ONLY valid JSON:
-{
-  "files": [
-    {
-      "path": "filename.ext",
-      "action": "modify|add|delete|edit",
-      "content": "complete file content for modify/add",
-      "edits": [{"search": "...", "replace": "..."}]  // for edit action only
+    if (technicalNotes) {
+        if (style === 'xml-tags') {
+            systemPrompt += `\n\n<context_specific>\n${technicalNotes}\n</context_specific>`;
+        } else {
+            systemPrompt += `\n\n### Context-Specific Guidelines\n${technicalNotes}`;
+        }
     }
-  ],
-  "description": "Brief description of changes"
-}
-</output_format>
 
-<actions>
-- "modify": Full file replacement (use for large changes)
-- "add": Create new file
-- "delete": Remove file
-- "edit": Search/replace for surgical changes (preferred for small changes)
-</actions>
-${editFormatInstructions ? `<edit_format>${editFormatInstructions}</edit_format>` : ''}
-${technicalNotes ? `<technical_notes>${technicalNotes}</technical_notes>` : ''}
-<rules>
+    // Add extra rules
+    const rules = style === 'xml-tags'
+        ? `\n<rules>
 - Only return files that CHANGE - never include unchanged files
 - For modify/add: return COMPLETE file content
 - Preserve existing functionality unless asked to change
 - Files marked [LARGE]: consider splitting when making changes
-- NO base64 data URLs for images - use https://picsum.photos/WIDTH/HEIGHT
-</rules>`;
-    }
-
-    // Default markdown-style prompt (GPT, Gemini, etc.)
-    return `You are an expert Frontend Developer. Modify an existing website based on the user's request.
-
-### Project Files
-${fileList}
-Total: ${formatTokenCount(health.totalTokens)} tokens
-
-### Output Format
-Return **ONLY** valid JSON:
-\`\`\`json
-{
-  "files": [
-    {
-      "path": "filename.ext",
-      "action": "modify|add|delete|edit",
-      "content": "complete file content",
-      "edits": [{"search": "...", "replace": "..."}]
-    }
-  ],
-  "description": "Brief description"
-}
-\`\`\`
-
-### Actions
-- \`modify\`: Full file replacement (use for large changes)
-- \`add\`: Create new file
-- \`delete\`: Remove file
-- \`edit\`: Search/replace for surgical changes
-${editFormatInstructions}
-${technicalNotes ? `### Technical Notes\n${technicalNotes}\n` : ''}
-### Rules
+</rules>`
+        : `\n\n### Rules
 1. Only return files that CHANGE
 2. For modify/add: return COMPLETE content
 3. Preserve existing functionality
-4. Files marked [LARGE]: consider splitting
-5. NO base64 data URLs for images
+4. Files marked [LARGE]: consider splitting`;
 
-**CRITICAL**: Output ONLY the JSON. No explanation.`;
+    systemPrompt += rules;
+
+    return systemPrompt;
 }
 
 /**

@@ -29,10 +29,16 @@ const MODEL_PROFILES = {
         jsonReliability: 'high',
         toolSupport: 'native',
         preferEditFormat: true,       // Prefers search/replace over full rewrites
+        completionStyle: 'thorough',  // Creates complete files naturally
         specialInstructions: [
+            'Create complete, production-ready code',
             'Use structured XML tags for complex instructions',
-            'Prefer search/replace over full file rewrites',
-            'Excellent at preserving context in large files'
+            'Prefer search/replace over full file rewrites'
+        ],
+        codeGenHints: [
+            'Always create index.html, styles.css, and script.js for non-trivial sites',
+            'Use semantic HTML5 elements',
+            'Add appropriate ARIA labels for accessibility'
         ]
     },
     gpt: {
@@ -43,10 +49,16 @@ const MODEL_PROFILES = {
         jsonReliability: 'high',
         toolSupport: 'native',
         preferEditFormat: true,
+        completionStyle: 'thorough',
         specialInstructions: [
             'Be concise in explanations',
-            'Always complete code blocks',
-            'Good at following structured output formats'
+            'Always complete code blocks fully',
+            'Create all necessary files for a working site'
+        ],
+        codeGenHints: [
+            'Separate concerns: HTML structure, CSS styling, JS behavior',
+            'Use modern ES6+ JavaScript features',
+            'Include responsive design considerations'
         ]
     },
     o1: {
@@ -71,10 +83,16 @@ const MODEL_PROFILES = {
         jsonReliability: 'medium',    // Sometimes adds commentary
         toolSupport: 'native',
         preferEditFormat: false,      // Can handle full files easily with 1M context
+        completionStyle: 'verbose',   // May add extra explanation
         specialInstructions: [
-            'Can handle entire codebase in context',
-            'May need explicit JSON-only reminders',
-            'Excellent for large project analysis'
+            'OUTPUT JSON ONLY - no markdown, no explanations outside JSON',
+            'Create complete multi-file projects',
+            'Do not add commentary before or after the JSON'
+        ],
+        codeGenHints: [
+            'Always return valid JSON with all required files',
+            'Include index.html, styles.css, script.js for interactive sites',
+            'Do not explain - just return the code'
         ]
     },
     llama: {
@@ -85,10 +103,16 @@ const MODEL_PROFILES = {
         jsonReliability: 'medium',
         toolSupport: 'limited',       // Works but less reliable
         preferEditFormat: true,
+        completionStyle: 'needs-guidance',  // May stop early without explicit instructions
         specialInstructions: [
-            'Keep responses focused',
-            'Explicit format reminders help',
-            'May need multiple attempts for complex JSON'
+            'You MUST create complete files - never truncate code',
+            'Always include index.html AND styles.css AND script.js',
+            'Follow the exact JSON format specified - no extra text'
+        ],
+        codeGenHints: [
+            'Create ALL files needed for a working website',
+            'Do NOT stop after just creating HTML - add CSS and JS too',
+            'Complete the entire request in one response'
         ]
     },
     mistral: {
@@ -113,10 +137,16 @@ const MODEL_PROFILES = {
         jsonReliability: 'high',
         toolSupport: 'limited',
         preferEditFormat: true,
+        completionStyle: 'code-focused',
         specialInstructions: [
-            'Excellent for code generation',
-            'Best for programming tasks',
-            'Strong reasoning capabilities'
+            'Create complete, working code files',
+            'Focus on functionality over explanation',
+            'Return valid JSON with all required files'
+        ],
+        codeGenHints: [
+            'Excellent at generating multi-file web projects',
+            'Use modern JavaScript patterns',
+            'Include all files needed for a complete site'
         ]
     },
     qwen: {
@@ -166,9 +196,16 @@ const MODEL_PROFILES = {
         jsonReliability: 'low',
         toolSupport: 'none',
         preferEditFormat: false,
+        completionStyle: 'needs-guidance',
         specialInstructions: [
-            'Unknown model - using conservative settings',
-            'May require format reinforcement'
+            'Return ONLY valid JSON - no other text',
+            'Create complete files - never truncate',
+            'Include ALL files needed for a working website'
+        ],
+        codeGenHints: [
+            'You MUST create index.html with complete HTML structure',
+            'For anything interactive, also create styles.css and script.js',
+            'Do not stop after creating just one file'
         ]
     }
 };
@@ -308,6 +345,36 @@ export function getSpecialInstructions(modelId) {
 export function hasStrength(modelId, strength) {
     const profile = getModelProfile(modelId);
     return profile.strengths.includes(strength);
+}
+
+/**
+ * Get code generation hints for a model
+ * @param {string} modelId - OpenRouter model ID
+ * @returns {string[]} - Array of code generation hints
+ */
+export function getCodeGenHints(modelId) {
+    const profile = getModelProfile(modelId);
+    return profile.codeGenHints || [];
+}
+
+/**
+ * Get the completion style for a model
+ * @param {string} modelId - OpenRouter model ID
+ * @returns {string} - Completion style ('thorough', 'needs-guidance', 'verbose', 'code-focused')
+ */
+export function getCompletionStyle(modelId) {
+    const profile = getModelProfile(modelId);
+    return profile.completionStyle || 'needs-guidance';
+}
+
+/**
+ * Check if model needs extra completion guidance
+ * @param {string} modelId - OpenRouter model ID
+ * @returns {boolean} - Whether extra guidance is needed
+ */
+export function needsCompletionGuidance(modelId) {
+    const style = getCompletionStyle(modelId);
+    return style === 'needs-guidance' || style === 'verbose';
 }
 
 // Export the raw profiles for advanced use cases
