@@ -1123,6 +1123,18 @@ async function runSimpleGeneration(
       throw new Error(`OpenRouter auth failed: ${errorMsg}. Please re-setup your API key.`);
     }
 
+    // Handle routing errors (common with free models when providers are unavailable)
+    if (errorMsg.includes('No matching route') || errorMsg.includes('not configured in the Gateway')) {
+      const isFreeModel = jobData.model.includes(':free');
+      let helpfulMsg = `Model "${jobData.model}" is temporarily unavailable`;
+      if (isFreeModel) {
+        helpfulMsg += '. Free model providers may be overloaded. Try again in a few minutes, or switch to a paid model for more reliable access.';
+      } else {
+        helpfulMsg += '. The model may be offline or not available through any provider. Try a different model.';
+      }
+      throw new Error(helpfulMsg);
+    }
+
     // Handle provider errors
     if (response.status === 502 || errorMsg.toLowerCase().includes('provider')) {
       let helpfulMsg = `Provider returned error for model "${jobData.model}"`;
@@ -1355,6 +1367,18 @@ async function runAgentGeneration(
           console.error('[process-job] 2. The session key was corrupted during storage/retrieval');
           console.error('[process-job] 3. The key reconstruction from shares failed');
           throw new Error(`OpenRouter auth failed: ${errorMsg}. Please re-setup your API key.`);
+        }
+
+        // Handle routing errors (common with free models when providers are unavailable)
+        if (errorMsg.includes('No matching route') || errorMsg.includes('not configured in the Gateway')) {
+          const isFreeModel = jobData.model.includes(':free');
+          let helpfulMsg = `Model "${jobData.model}" is temporarily unavailable`;
+          if (isFreeModel) {
+            helpfulMsg += '. Free model providers may be overloaded. Try again in a few minutes, or switch to a paid model for more reliable access.';
+          } else {
+            helpfulMsg += '. The model may be offline or not available through any provider. Try a different model.';
+          }
+          throw new Error(helpfulMsg);
         }
 
         // Handle provider errors with more context
