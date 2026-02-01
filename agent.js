@@ -11,11 +11,31 @@ import { analyzeProjectHealth, generateCodeMap, estimateTokens, formatTokenCount
 import { checkModelToolSupport } from './ai.js';
 import { getApiKey } from './job-queue.js';
 import { getModelProfile, getPromptStyle } from './model-profiles.js';
-import { applyEdits, validateEdits, validateFileSyntax } from './file-ops.js';
+import { applyEdits, validateEdits, validateFileSyntax, validateAndRepairFiles } from './file-ops.js';
 
 // Agent configuration
 const MAX_ITERATIONS = 10;
 const API_TIMEOUT = 180000;
+
+// Starter template for new projects - ensures all models have a foundation
+const STARTER_TEMPLATE = {
+    path: 'index.html',
+    content: `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Project</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold text-gray-800 mb-4">Welcome</h1>
+        <p class="text-gray-600">Edit this template to build your website.</p>
+    </div>
+</body>
+</html>`
+};
 
 // Working files state during agent execution
 let workingFiles = [];
@@ -387,6 +407,15 @@ function buildAgentSystemPrompt(isNewProject, modelProfile) {
     const mode = isNewProject ? 'CREATE' : 'MODIFY';
     const style = modelProfile?.promptStyle || 'markdown';
 
+    // Critical rules for all models (especially important for weaker models)
+    const criticalRules = `
+CRITICAL RULES - YOU MUST FOLLOW THESE:
+1. This is a STATIC WEBSITE builder. You create web projects.
+2. index.html MUST exist - it is the main entry point. NEVER delete it.
+3. You may create any file types needed (.html, .css, .js, .json, .txt, .md, etc.)
+4. The main content should be in index.html - users see this first.
+5. No server-side code (no PHP, Python, etc.) - static files only.`;
+
     // Base tool documentation
     const toolDocs = `
 - read_file(path): Read a file's content
@@ -411,20 +440,15 @@ EFFICIENCY RULES:
 CHANGE STRATEGY:
 - Small change (<10 lines): Use edit_file with search/replace
 - Medium change (10-50 lines): Use edit_file with multiple edits
-- Large change (>50 lines or structural): Use write_file
-
-SEARCH/REPLACE TIPS:
-- Include 1-2 lines of context around the change for uniqueness
-- Search strings must be unique in the file
-- If unsure, read the file first to find exact text`;
+- Large change (>50 lines or structural): Use write_file`;
 
     // Requirements (same for all)
     const requirements = `
 REQUIREMENTS:
-- Always include index.html as entry point
+- index.html MUST be the main page (REQUIRED - never delete)
 - Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
 - Write clean, semantic HTML5
-- Use vanilla JavaScript
+- Use vanilla JavaScript (no frameworks)
 - Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs
 - Make it mobile-responsive
 - Keep individual files under 200 lines when practical`;
@@ -432,7 +456,9 @@ REQUIREMENTS:
     // Model-specific formatting
     if (style === 'xml-tags') {
         // Claude-optimized prompt
-        return `<role>You are an expert Frontend Developer agent. You ${isNewProject ? 'create' : 'modify'} static websites through iterative tool calls.</role>
+        return `<role>You are an expert Frontend Developer agent building STATIC WEBSITES.</role>
+
+<critical>${criticalRules}</critical>
 
 <mode>${mode}</mode>
 
@@ -440,25 +466,27 @@ REQUIREMENTS:
 </tools>
 
 <workflow>
-1. ${isNewProject ? 'Plan the file structure' : 'Use list_files() to understand the project, then read_file() for specific files'}
-2. Make changes using edit_file (preferred) or write_file
-3. Validate changes with validate_file
-4. Continue until all requested changes are complete
+1. ${isNewProject ? 'Read index.html to see the starter template, then build on it' : 'Use list_files() to understand the project, then read_file() for specific files'}
+2. Use edit_file to modify index.html with the requested content
+3. Add styles.css and script.js if needed
+4. Validate changes with validate_file
 5. Call finish() with a summary when done
 </workflow>
 ${efficiencyRules}
 ${requirements}
 
 <important>
-- Make changes incrementally - don't try to do everything in one call
-- Test your understanding by reading files before modifying
+- Make changes incrementally
+- index.html MUST remain as the main entry point
 - Preserve existing functionality unless asked to change
 - Call finish() ONLY when ALL changes are complete
 </important>`;
     }
 
-    // Default markdown-style prompt
-    return `You are an expert Frontend Developer agent. You ${isNewProject ? 'create' : 'modify'} static websites through iterative tool calls.
+    // Default markdown-style prompt (GPT, Gemini, Llama, etc.)
+    return `You are an expert Frontend Developer agent building STATIC WEBSITES.
+
+${criticalRules}
 
 ### Mode: ${mode}
 
@@ -466,17 +494,17 @@ ${requirements}
 ${toolDocs}
 
 ### Workflow
-1. ${isNewProject ? 'Plan the file structure' : 'Use list_files() to understand the project, then read_file() for specific files'}
-2. Make changes using edit_file (preferred) or write_file
-3. Validate changes with validate_file
-4. Continue until all requested changes are complete
+1. ${isNewProject ? 'Read index.html to see the starter template, then build on it' : 'Use list_files() to understand the project, then read_file() for specific files'}
+2. Use edit_file to modify index.html with the requested content
+3. Add styles.css and script.js if needed
+4. Validate changes with validate_file
 5. Call finish() with a summary when done
 ${efficiencyRules}
 ${requirements}
 
 ### Important
-- Make changes incrementally - don't try to do everything in one call
-- Test your understanding by reading files before modifying
+- Make changes incrementally
+- index.html MUST remain as the main entry point
 - Preserve existing functionality unless asked to change
 - Call finish() ONLY when ALL changes are complete`;
 }
@@ -511,7 +539,8 @@ export async function runAgent(prompt, currentFiles) {
     }
 
     // Initialize working state
-    workingFiles = isNewProject ? [] : JSON.parse(JSON.stringify(currentFiles));
+    // For new projects, start with a minimal HTML template so all models have a foundation
+    workingFiles = isNewProject ? [{ ...STARTER_TEMPLATE }] : JSON.parse(JSON.stringify(currentFiles));
     iterationCount = 0;
 
     // Get key from either server session or client-side storage
@@ -540,8 +569,18 @@ export async function runAgent(prompt, currentFiles) {
         { role: "system", content: buildAgentSystemPrompt(isNewProject, modelProfile) }
     ];
 
-    // For existing projects, provide context
-    if (!isNewProject) {
+    // For new projects, tell the agent about the starter template
+    if (isNewProject) {
+        messages.push({
+            role: "user",
+            content: `STARTER TEMPLATE PROVIDED:\n- index.html (basic HTML5 + Tailwind CSS template)\n\nYou can read and modify this file. Build upon it to create the requested website.`
+        });
+        messages.push({
+            role: "assistant",
+            content: "I see the starter template. I'll build upon index.html to create the requested website, adding styles and JavaScript as needed."
+        });
+    } else {
+        // For existing projects, provide context
         const health = analyzeProjectHealth(currentFiles);
         const fileList = currentFiles.map(f => `- ${f.path} (${estimateTokens(f.content)} tokens)`).join('\n');
 
@@ -721,6 +760,53 @@ export async function runAgent(prompt, currentFiles) {
     if (workingFiles.length === 0) {
         thinking.setStatus('error', 'No valid files after filtering');
         throw new Error('Agent produced no valid files');
+    }
+
+    // Auto-repair HTML files (handles truncation and missing tags from LLMs)
+    const repairResult = validateAndRepairFiles(workingFiles);
+    if (repairResult.repairs.length > 0) {
+        devLog('Auto-repaired HTML files:', repairResult.repairs);
+        for (const repair of repairResult.repairs) {
+            thinking.log('info', `Auto-repaired ${repair.path}: ${repair.repairs.join(', ')}`);
+        }
+        workingFiles = repairResult.files;
+    }
+
+    // CRITICAL: Ensure index.html exists - this is required for the website to work
+    const hasIndexHtml = workingFiles.some(f => f.path === 'index.html' || f.path === './index.html');
+    if (!hasIndexHtml) {
+        devError('No index.html found - creating fallback');
+        thinking.log('warning', 'AI did not create index.html - adding fallback');
+
+        // Create a minimal index.html
+        const otherHtmlFiles = workingFiles.filter(f => f.path.endsWith('.html'));
+        const links = otherHtmlFiles.length > 0
+            ? otherHtmlFiles.map(f => `<li><a href="${f.path}" class="text-blue-500 hover:underline">${f.path}</a></li>`).join('\n        ')
+            : '<li class="text-gray-500">No additional pages</li>';
+
+        const fallbackHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-100 p-8">
+    <div class="max-w-2xl mx-auto">
+        <h1 class="text-3xl font-bold text-gray-800 mb-4">Project Files</h1>
+        <p class="text-gray-600 mb-4">The AI created the following files:</p>
+        <ul class="list-disc list-inside space-y-2">
+        ${links}
+        </ul>
+        <div class="mt-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+            <p class="text-yellow-800 text-sm">Note: The AI didn't create a proper index.html. You may want to regenerate.</p>
+        </div>
+    </div>
+</body>
+</html>`;
+
+        workingFiles.unshift({ path: 'index.html', content: fallbackHtml });
     }
 
     thinking.setStatus('complete', `Agent completed in ${iterationCount} iterations`);

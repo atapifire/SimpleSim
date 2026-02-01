@@ -209,9 +209,10 @@ export function mergeWithEdits(existingFiles, changes) {
  * Validate file syntax based on file extension
  * @param {string} path - File path
  * @param {string} content - File content
- * @returns {{valid: boolean, error?: string, warnings: string[]}}
+ * @param {boolean} autoRepair - Whether to attempt auto-repair for HTML (default: false for validation only)
+ * @returns {{valid: boolean, error?: string, warnings: string[], content?: string, repaired?: boolean}}
  */
-export function validateFileSyntax(path, content) {
+export function validateFileSyntax(path, content, autoRepair = false) {
     const warnings = [];
     const ext = path.split('.').pop()?.toLowerCase();
 
@@ -222,6 +223,9 @@ export function validateFileSyntax(path, content) {
     switch (ext) {
         case 'html':
         case 'htm':
+            if (autoRepair) {
+                return validateAndRepairHTML(content, true);
+            }
             return validateHTML(content);
 
         case 'css':
@@ -237,6 +241,36 @@ export function validateFileSyntax(path, content) {
         default:
             return { valid: true, warnings: ['Unknown file type - skipping syntax validation'] };
     }
+}
+
+/**
+ * Validate and repair all files in a project
+ * @param {Array<{path: string, content: string}>} files - Project files
+ * @returns {{files: Array, repairs: Array<{path: string, repairs: string[]}>}}
+ */
+export function validateAndRepairFiles(files) {
+    const repairedFiles = [];
+    const allRepairs = [];
+
+    for (const file of files) {
+        const ext = file.path.split('.').pop()?.toLowerCase();
+
+        if (ext === 'html' || ext === 'htm') {
+            const result = validateAndRepairHTML(file.content, true);
+
+            if (result.repaired) {
+                repairedFiles.push({ path: file.path, content: result.content });
+                allRepairs.push({ path: file.path, repairs: result.repairs });
+                devLog(`Auto-repaired ${file.path}: ${result.repairs.join(', ')}`);
+            } else {
+                repairedFiles.push(file);
+            }
+        } else {
+            repairedFiles.push(file);
+        }
+    }
+
+    return { files: repairedFiles, repairs: allRepairs };
 }
 
 /**
@@ -297,10 +331,13 @@ export function detectTruncation(originalContent, newContent) {
  * Check for common file issues that indicate generation problems
  * @param {Array<{path: string, content: string}>} originalFiles
  * @param {Array<{path: string, content: string, action?: string}>} newFiles
- * @returns {{valid: boolean, issues: string[]}}
+ * @param {Object} options - Options object
+ * @param {boolean} options.autoRepair - Whether to auto-repair HTML files (default: false)
+ * @returns {{valid: boolean, issues: string[], files?: Array, repairs?: Array}}
  */
-export function validateGenerationResult(originalFiles, newFiles) {
+export function validateGenerationResult(originalFiles, newFiles, options = {}) {
     const issues = [];
+    const autoRepair = options.autoRepair || false;
 
     // Check for unexpected file disappearances
     for (const original of originalFiles) {
@@ -325,13 +362,40 @@ export function validateGenerationResult(originalFiles, newFiles) {
         }
     }
 
-    // Validate syntax for each new file
+    // Validate syntax for each new file (without repair first)
     for (const file of newFiles) {
         if (file.content) {
-            const syntaxResult = validateFileSyntax(file.path, file.content);
+            const syntaxResult = validateFileSyntax(file.path, file.content, false);
             if (!syntaxResult.valid) {
                 issues.push(`File "${file.path}" has syntax error: ${syntaxResult.error}`);
             }
+        }
+    }
+
+    // If we have issues and autoRepair is enabled, try to repair
+    if (issues.length > 0 && autoRepair) {
+        const repairResult = validateAndRepairFiles(newFiles);
+
+        if (repairResult.repairs.length > 0) {
+            // Re-validate after repair
+            const postRepairIssues = [];
+            for (const file of repairResult.files) {
+                if (file.content) {
+                    const syntaxResult = validateFileSyntax(file.path, file.content, false);
+                    if (!syntaxResult.valid) {
+                        postRepairIssues.push(`File "${file.path}" has syntax error: ${syntaxResult.error}`);
+                    }
+                }
+            }
+
+            return {
+                valid: postRepairIssues.length === 0,
+                issues: postRepairIssues,
+                originalIssues: issues,
+                files: repairResult.files,
+                repairs: repairResult.repairs,
+                repaired: true
+            };
         }
     }
 
@@ -406,39 +470,377 @@ function fuzzyFindSearch(content, search) {
     };
 }
 
-function validateHTML(content) {
-    const warnings = [];
+/**
+ * Self-closing tags that don't need closing tags
+ */
+const VOID_ELEMENTS = new Set([
+    'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+    'link', 'meta', 'param', 'source', 'track', 'wbr'
+]);
 
-    // Check for basic structure
-    if (!content.includes('<!DOCTYPE') && !content.includes('<!doctype')) {
-        warnings.push('Missing DOCTYPE declaration');
-    }
+/**
+ * Common LLM truncation patterns
+ */
+/**
+ * Common LLM truncation patterns
+ * These are designed to catch LLM output that was cut off mid-syntax
+ */
+const TRUNCATION_PATTERNS = [
+    /<[a-z][a-z0-9]*(?:\s+[^>]*)?$/i,   // Unclosed opening tag (no closing >)
+    /<!--(?!.*-->).*$/s,                  // Unclosed comment (no -->)
+    /<script[^>]*>(?![\s\S]*<\/script>)[\s\S]*$/i,  // Unclosed script
+    /<style[^>]*>(?![\s\S]*<\/style>)[\s\S]*$/i,    // Unclosed style
+    /=\s*["'][^"']*$/,                    // Unclosed attribute value (starts with = ")
+];
 
-    // Check for balanced tags (simple check)
-    const openTags = (content.match(/<[a-zA-Z][^>]*[^/]>/g) || []).length;
-    const closeTags = (content.match(/<\/[a-zA-Z][^>]*>/g) || []).length;
-    const selfClosing = (content.match(/<[a-zA-Z][^>]*\/>/g) || []).length;
-
-    // This is a very rough check - HTML is complex
-    if (Math.abs(openTags - closeTags - selfClosing) > 5) {
-        warnings.push('Potentially unbalanced HTML tags');
-    }
-
-    // Check for truncated content (ends mid-tag)
+/**
+ * Detect if HTML is truncated (common LLM issue, especially with Llama 3.3)
+ */
+function detectHTMLTruncation(content) {
     const trimmed = content.trim();
-    if (trimmed.endsWith('<') || (trimmed.includes('<') && !trimmed.endsWith('>'))) {
-        const lastOpen = trimmed.lastIndexOf('<');
-        const lastClose = trimmed.lastIndexOf('>');
-        if (lastOpen > lastClose) {
-            return {
-                valid: false,
-                error: 'HTML appears truncated (ends with incomplete tag)',
-                warnings
-            };
+
+    // Check for truncation patterns
+    for (const pattern of TRUNCATION_PATTERNS) {
+        if (pattern.test(trimmed)) {
+            return { truncated: true, reason: 'Unclosed syntax at end of content' };
         }
     }
 
+    // Check if HTML ends abruptly (no closing html or body)
+    const hasHtmlTag = /<html[^>]*>/i.test(trimmed);
+    const hasClosingHtml = /<\/html\s*>/i.test(trimmed);
+    const hasBodyTag = /<body[^>]*>/i.test(trimmed);
+    const hasClosingBody = /<\/body\s*>/i.test(trimmed);
+
+    if (hasHtmlTag && !hasClosingHtml) {
+        return { truncated: true, reason: 'Missing closing </html> tag' };
+    }
+
+    if (hasBodyTag && !hasClosingBody) {
+        return { truncated: true, reason: 'Missing closing </body> tag' };
+    }
+
+    // Check for unclosed script/style tags
+    const scriptOpens = (trimmed.match(/<script[^>]*>/gi) || []).length;
+    const scriptCloses = (trimmed.match(/<\/script>/gi) || []).length;
+    if (scriptOpens > scriptCloses) {
+        return { truncated: true, reason: 'Unclosed <script> tag' };
+    }
+
+    const styleOpens = (trimmed.match(/<style[^>]*>/gi) || []).length;
+    const styleCloses = (trimmed.match(/<\/style>/gi) || []).length;
+    if (styleOpens > styleCloses) {
+        return { truncated: true, reason: 'Unclosed <style> tag' };
+    }
+
+    return { truncated: false };
+}
+
+/**
+ * Check if HTML tags are properly balanced
+ */
+function checkTagBalance(content) {
+    const result = { balanced: true, errors: [], unclosedTags: [] };
+    const tagStack = [];
+    const tagRegex = /<\/?([a-z][a-z0-9]*)[^>]*\/?>/gi;
+
+    let match;
+    let lineNumber = 1;
+    let lastIndex = 0;
+
+    while ((match = tagRegex.exec(content)) !== null) {
+        // Count newlines to track line number
+        const textBefore = content.substring(lastIndex, match.index);
+        lineNumber += (textBefore.match(/\n/g) || []).length;
+        lastIndex = match.index;
+
+        const fullTag = match[0];
+        const tagName = match[1].toLowerCase();
+
+        // Skip void elements
+        if (VOID_ELEMENTS.has(tagName)) continue;
+
+        // Skip self-closing tags
+        if (fullTag.endsWith('/>')) continue;
+
+        // Skip comments, doctype, etc.
+        if (fullTag.startsWith('<!') || fullTag.startsWith('<?')) continue;
+
+        if (fullTag.startsWith('</')) {
+            // Closing tag
+            if (tagStack.length === 0) {
+                result.balanced = false;
+                result.errors.push({
+                    message: `Unexpected closing tag </${tagName}>`,
+                    line: lineNumber
+                });
+            } else {
+                const lastOpen = tagStack.pop();
+                if (lastOpen.name !== tagName) {
+                    result.balanced = false;
+                    result.errors.push({
+                        message: `Mismatched tags: expected </${lastOpen.name}> but found </${tagName}>`,
+                        line: lineNumber
+                    });
+                    // Try to recover by looking for matching tag
+                    const matchingIndex = tagStack.findIndex(t => t.name === tagName);
+                    if (matchingIndex >= 0) {
+                        while (tagStack.length > matchingIndex) {
+                            const unclosed = tagStack.pop();
+                            result.errors.push({
+                                message: `Unclosed tag <${unclosed.name}>`,
+                                line: unclosed.line
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            // Opening tag
+            tagStack.push({ name: tagName, line: lineNumber });
+        }
+    }
+
+    // Check for unclosed tags
+    while (tagStack.length > 0) {
+        const unclosed = tagStack.pop();
+        result.balanced = false;
+        result.unclosedTags.push(unclosed.name);
+        result.errors.push({
+            message: `Unclosed tag <${unclosed.name}>`,
+            line: unclosed.line
+        });
+    }
+
+    return result;
+}
+
+/**
+ * Find common HTML issues (accessibility, duplicates, etc.)
+ */
+function findHTMLIssues(content) {
+    const issues = [];
+
+    // Check for duplicate IDs
+    const idMatches = content.match(/\bid\s*=\s*["']([^"']+)["']/gi) || [];
+    const ids = {};
+    for (const match of idMatches) {
+        const idMatch = match.match(/["']([^"']+)["']/);
+        if (idMatch) {
+            const id = idMatch[1];
+            if (ids[id]) {
+                issues.push(`Duplicate ID: "${id}"`);
+            }
+            ids[id] = true;
+        }
+    }
+
+    // Check for missing alt on images
+    const imgTags = content.match(/<img[^>]*>/gi) || [];
+    for (const img of imgTags) {
+        if (!/\balt\s*=/i.test(img)) {
+            issues.push('Image missing alt attribute');
+        }
+    }
+
+    return issues;
+}
+
+/**
+ * Comprehensive HTML validation
+ */
+function validateHTML(content) {
+    const warnings = [];
+
+    if (!content || typeof content !== 'string') {
+        return { valid: false, error: 'Empty or invalid content', warnings };
+    }
+
+    const trimmed = content.trim();
+
+    // Check for truncation first (most common LLM issue)
+    const truncationCheck = detectHTMLTruncation(trimmed);
+    if (truncationCheck.truncated) {
+        return {
+            valid: false,
+            error: `HTML appears truncated: ${truncationCheck.reason}`,
+            warnings,
+            canRepair: true
+        };
+    }
+
+    // Check for DOCTYPE
+    if (!trimmed.includes('<!DOCTYPE') && !trimmed.includes('<!doctype')) {
+        warnings.push('Missing DOCTYPE declaration');
+    }
+
+    // Check tag balance
+    const tagBalance = checkTagBalance(trimmed);
+    if (!tagBalance.balanced) {
+        const errorMessages = tagBalance.errors.map(e => e.message).join('; ');
+        return {
+            valid: false,
+            error: `Unbalanced HTML tags: ${errorMessages}`,
+            warnings,
+            canRepair: true,
+            unclosedTags: tagBalance.unclosedTags
+        };
+    }
+
+    // Check for common issues
+    const issues = findHTMLIssues(trimmed);
+    warnings.push(...issues);
+
     return { valid: true, warnings };
+}
+
+/**
+ * Attempt to repair broken HTML
+ */
+export function repairHTML(content) {
+    let repaired = content;
+    const repairs = [];
+
+    // Add DOCTYPE if missing
+    if (!/<!DOCTYPE\s+html>/i.test(repaired)) {
+        repaired = '<!DOCTYPE html>\n' + repaired;
+        repairs.push('Added DOCTYPE declaration');
+    }
+
+    // Wrap in html tag if missing
+    if (!/<html[^>]*>/i.test(repaired)) {
+        const doctypeMatch = repaired.match(/<!DOCTYPE[^>]*>/i);
+        if (doctypeMatch) {
+            const afterDoctype = repaired.substring(doctypeMatch.index + doctypeMatch[0].length);
+            repaired = doctypeMatch[0] + '\n<html lang="en">' + afterDoctype + '\n</html>';
+        } else {
+            repaired = '<html lang="en">\n' + repaired + '\n</html>';
+        }
+        repairs.push('Wrapped content in <html> tag');
+    }
+
+    // Add head if missing
+    if (!/<head[^>]*>/i.test(repaired)) {
+        const htmlMatch = repaired.match(/<html[^>]*>/i);
+        if (htmlMatch) {
+            const insertPos = htmlMatch.index + htmlMatch[0].length;
+            const defaultHead = `
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>`;
+            repaired = repaired.substring(0, insertPos) + defaultHead + repaired.substring(insertPos);
+            repairs.push('Added default <head> section');
+        }
+    }
+
+    // Add body if missing
+    if (!/<body[^>]*>/i.test(repaired)) {
+        const headCloseMatch = repaired.match(/<\/head\s*>/i);
+        if (headCloseMatch) {
+            const insertPos = headCloseMatch.index + headCloseMatch[0].length;
+            const afterHead = repaired.substring(insertPos);
+            const htmlCloseMatch = afterHead.match(/<\/html\s*>/i);
+            if (htmlCloseMatch) {
+                const bodyContent = afterHead.substring(0, htmlCloseMatch.index);
+                const afterHtmlClose = afterHead.substring(htmlCloseMatch.index);
+                repaired = repaired.substring(0, insertPos) + '\n<body>' + bodyContent + '</body>\n' + afterHtmlClose;
+                repairs.push('Wrapped content in <body> tag');
+            }
+        }
+    }
+
+    // Close unclosed tags
+    const balance = checkTagBalance(repaired);
+    if (!balance.balanced && balance.unclosedTags.length > 0) {
+        // Close unclosed tags at the end (before </body> or </html>)
+        for (const tag of balance.unclosedTags.reverse()) {
+            const bodyClose = repaired.lastIndexOf('</body>');
+            const htmlClose = repaired.lastIndexOf('</html>');
+            let insertPos = repaired.length;
+
+            if (bodyClose > -1) {
+                insertPos = bodyClose;
+            } else if (htmlClose > -1) {
+                insertPos = htmlClose;
+            }
+
+            repaired = repaired.substring(0, insertPos) + `</${tag}>` + repaired.substring(insertPos);
+            repairs.push(`Added missing </${tag}> closing tag`);
+        }
+    }
+
+    // Close unclosed script tags
+    const scriptOpens = (repaired.match(/<script[^>]*>/gi) || []).length;
+    const scriptCloses = (repaired.match(/<\/script>/gi) || []).length;
+    if (scriptOpens > scriptCloses) {
+        const diff = scriptOpens - scriptCloses;
+        for (let i = 0; i < diff; i++) {
+            repaired = repaired + '</script>';
+            repairs.push('Added missing </script> closing tag');
+        }
+    }
+
+    // Close unclosed style tags
+    const styleOpens = (repaired.match(/<style[^>]*>/gi) || []).length;
+    const styleCloses = (repaired.match(/<\/style>/gi) || []).length;
+    if (styleOpens > styleCloses) {
+        const diff = styleOpens - styleCloses;
+        for (let i = 0; i < diff; i++) {
+            repaired = repaired + '</style>';
+            repairs.push('Added missing </style> closing tag');
+        }
+    }
+
+    return {
+        content: repaired,
+        repairs,
+        repaired: repairs.length > 0
+    };
+}
+
+/**
+ * Validate and optionally repair HTML
+ */
+export function validateAndRepairHTML(content, autoRepair = true) {
+    const validation = validateHTML(content);
+
+    if (validation.valid) {
+        return {
+            valid: true,
+            content,
+            repaired: false,
+            warnings: validation.warnings
+        };
+    }
+
+    if (!autoRepair || !validation.canRepair) {
+        return {
+            valid: false,
+            content,
+            repaired: false,
+            error: validation.error,
+            warnings: validation.warnings
+        };
+    }
+
+    // Attempt repair
+    const repair = repairHTML(content);
+
+    // Re-validate repaired content
+    const revalidation = validateHTML(repair.content);
+
+    return {
+        valid: revalidation.valid,
+        content: repair.content,
+        repaired: repair.repaired,
+        repairs: repair.repairs,
+        originalError: validation.error,
+        error: revalidation.valid ? null : revalidation.error,
+        warnings: revalidation.warnings
+    };
 }
 
 function validateCSS(content) {

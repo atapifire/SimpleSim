@@ -923,7 +923,8 @@ export function subscribeToJob(jobId, callbacks = {}) {
         onProgress = () => {},
         onComplete = () => {},
         onError = () => {},
-        onStatusChange = () => {}
+        onStatusChange = () => {},
+        onLog = () => {}  // New: callback for processing log updates
     } = callbacks;
 
     devLog('Subscribing to job updates:', jobId);
@@ -944,6 +945,11 @@ export function subscribeToJob(jobId, callbacks = {}) {
 
                 onStatusChange(job.status);
 
+                // Send processing logs if available
+                if (job.processing_log && Array.isArray(job.processing_log)) {
+                    onLog(job.processing_log, job.model_info);
+                }
+
                 if (job.job_type === 'agent') {
                     onProgress({
                         iteration: job.current_iteration,
@@ -957,13 +963,15 @@ export function subscribeToJob(jobId, callbacks = {}) {
                         files: job.result_files,
                         description: job.result_description,
                         versionId: job.result_version_id,
-                        iterations: job.current_iteration
+                        iterations: job.current_iteration,
+                        processingLog: job.processing_log,
+                        modelInfo: job.model_info
                     });
                     channel.unsubscribe();
                 }
 
                 if (job.status === 'failed') {
-                    onError(new Error(job.error_message || 'Job failed'));
+                    onError(new Error(job.error_message || 'Job failed'), job.processing_log);
                     channel.unsubscribe();
                 }
             }

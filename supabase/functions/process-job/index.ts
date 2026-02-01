@@ -32,6 +32,97 @@ const SESSION_SECRET = Deno.env.get('SESSION_ENCRYPTION_SECRET') ||
 const MAX_EXECUTION_MS = 120000; // 2 minutes
 const AGENT_ITERATION_TIMEOUT_MS = 25000; // 25s per iteration
 
+// ============================================
+// Verbose Logging Helper
+// Logs to console and optionally to job record
+// ============================================
+interface LogEntry {
+  timestamp: string;
+  level: 'info' | 'warn' | 'error' | 'debug';
+  message: string;
+  data?: Record<string, unknown>;
+  duration_ms?: number;
+}
+
+class JobLogger {
+  private jobId: string | null = null;
+  private serviceClient: ReturnType<typeof createServiceClient> | null = null;
+  private logs: LogEntry[] = [];
+  private startTime: number = Date.now();
+
+  setContext(jobId: string, serviceClient: ReturnType<typeof createServiceClient>) {
+    this.jobId = jobId;
+    this.serviceClient = serviceClient;
+    this.startTime = Date.now();
+    this.logs = [];
+  }
+
+  private createEntry(level: LogEntry['level'], message: string, data?: Record<string, unknown>): LogEntry {
+    return {
+      timestamp: new Date().toISOString(),
+      level,
+      message,
+      data,
+      duration_ms: Date.now() - this.startTime
+    };
+  }
+
+  async log(level: LogEntry['level'], message: string, data?: Record<string, unknown>) {
+    const entry = this.createEntry(level, message, data);
+    this.logs.push(entry);
+
+    // Console output
+    const prefix = `[process-job:${this.jobId?.substring(0, 8) || 'init'}]`;
+    const dataStr = data ? ` ${JSON.stringify(data)}` : '';
+
+    switch (level) {
+      case 'error':
+        console.error(`${prefix} ${message}${dataStr}`);
+        break;
+      case 'warn':
+        console.warn(`${prefix} ${message}${dataStr}`);
+        break;
+      case 'debug':
+        console.log(`${prefix} [DEBUG] ${message}${dataStr}`);
+        break;
+      default:
+        console.log(`${prefix} ${message}${dataStr}`);
+    }
+
+    // Write to database (non-blocking)
+    if (this.jobId && this.serviceClient) {
+      this.serviceClient
+        .from('jobs')
+        .update({ processing_log: this.logs })
+        .eq('id', this.jobId)
+        .then(() => {})
+        .catch((err) => console.error('Failed to update job log:', err));
+    }
+  }
+
+  info(message: string, data?: Record<string, unknown>) {
+    return this.log('info', message, data);
+  }
+
+  warn(message: string, data?: Record<string, unknown>) {
+    return this.log('warn', message, data);
+  }
+
+  error(message: string, data?: Record<string, unknown>) {
+    return this.log('error', message, data);
+  }
+
+  debug(message: string, data?: Record<string, unknown>) {
+    return this.log('debug', message, data);
+  }
+
+  getLogs(): LogEntry[] {
+    return this.logs;
+  }
+}
+
+const logger = new JobLogger();
+
 interface JobData {
   id: string;
   user_id: string;
@@ -178,10 +269,246 @@ function applyEdits(
   return { success: true, content };
 }
 
+/**
+ * Self-closing tags that don't need closing tags
+ */
+const VOID_ELEMENTS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+  'link', 'meta', 'param', 'source', 'track', 'wbr'
+]);
+
+/**
+ * Common LLM truncation patterns
+ */
+/**
+ * Common LLM truncation patterns
+ * These are designed to catch LLM output that was cut off mid-syntax
+ */
+const TRUNCATION_PATTERNS = [
+  /<[a-z][a-z0-9]*(?:\s+[^>]*)?$/i,   // Unclosed opening tag (no closing >)
+  /<!--(?!.*-->).*$/s,                  // Unclosed comment (no -->)
+  /<script[^>]*>(?![\s\S]*<\/script>)[\s\S]*$/i,  // Unclosed script
+  /<style[^>]*>(?![\s\S]*<\/style>)[\s\S]*$/i,    // Unclosed style
+  /=\s*["'][^"']*$/,                    // Unclosed attribute value (starts with = ")
+];
+
+/**
+ * Detect if HTML is truncated (common LLM issue, especially with Llama 3.3)
+ */
+function detectHTMLTruncation(content: string): { truncated: boolean; reason?: string } {
+  const trimmed = content.trim();
+
+  // Check for truncation patterns
+  for (const pattern of TRUNCATION_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { truncated: true, reason: 'Unclosed syntax at end of content' };
+    }
+  }
+
+  // Check if HTML ends abruptly (no closing html or body)
+  const hasHtmlTag = /<html[^>]*>/i.test(trimmed);
+  const hasClosingHtml = /<\/html\s*>/i.test(trimmed);
+  const hasBodyTag = /<body[^>]*>/i.test(trimmed);
+  const hasClosingBody = /<\/body\s*>/i.test(trimmed);
+
+  if (hasHtmlTag && !hasClosingHtml) {
+    return { truncated: true, reason: 'Missing closing </html> tag' };
+  }
+
+  if (hasBodyTag && !hasClosingBody) {
+    return { truncated: true, reason: 'Missing closing </body> tag' };
+  }
+
+  // Check for unclosed script/style tags
+  const scriptOpens = (trimmed.match(/<script[^>]*>/gi) || []).length;
+  const scriptCloses = (trimmed.match(/<\/script>/gi) || []).length;
+  if (scriptOpens > scriptCloses) {
+    return { truncated: true, reason: 'Unclosed <script> tag' };
+  }
+
+  const styleOpens = (trimmed.match(/<style[^>]*>/gi) || []).length;
+  const styleCloses = (trimmed.match(/<\/style>/gi) || []).length;
+  if (styleOpens > styleCloses) {
+    return { truncated: true, reason: 'Unclosed <style> tag' };
+  }
+
+  return { truncated: false };
+}
+
+/**
+ * Check if HTML tags are properly balanced
+ */
+function checkTagBalance(content: string): { balanced: boolean; unclosedTags: string[] } {
+  const tagStack: string[] = [];
+  const tagRegex = /<\/?([a-z][a-z0-9]*)[^>]*\/?>/gi;
+
+  let match;
+  while ((match = tagRegex.exec(content)) !== null) {
+    const fullTag = match[0];
+    const tagName = match[1].toLowerCase();
+
+    // Skip void elements and self-closing tags
+    if (VOID_ELEMENTS.has(tagName)) continue;
+    if (fullTag.endsWith('/>')) continue;
+    if (fullTag.startsWith('<!') || fullTag.startsWith('<?')) continue;
+
+    if (fullTag.startsWith('</')) {
+      // Closing tag
+      if (tagStack.length > 0 && tagStack[tagStack.length - 1] === tagName) {
+        tagStack.pop();
+      }
+    } else {
+      // Opening tag
+      tagStack.push(tagName);
+    }
+  }
+
+  return { balanced: tagStack.length === 0, unclosedTags: tagStack.reverse() };
+}
+
+/**
+ * Attempt to repair broken HTML
+ */
+function repairHTML(content: string): { content: string; repairs: string[]; repaired: boolean } {
+  let repaired = content;
+  const repairs: string[] = [];
+
+  // Add DOCTYPE if missing
+  if (!/<!DOCTYPE\s+html>/i.test(repaired)) {
+    repaired = '<!DOCTYPE html>\n' + repaired;
+    repairs.push('Added DOCTYPE declaration');
+  }
+
+  // Wrap in html tag if missing
+  if (!/<html[^>]*>/i.test(repaired)) {
+    const doctypeMatch = repaired.match(/<!DOCTYPE[^>]*>/i);
+    if (doctypeMatch) {
+      const afterDoctype = repaired.substring(doctypeMatch.index! + doctypeMatch[0].length);
+      repaired = doctypeMatch[0] + '\n<html lang="en">' + afterDoctype + '\n</html>';
+    } else {
+      repaired = '<html lang="en">\n' + repaired + '\n</html>';
+    }
+    repairs.push('Wrapped content in <html> tag');
+  }
+
+  // Add head if missing
+  if (!/<head[^>]*>/i.test(repaired)) {
+    const htmlMatch = repaired.match(/<html[^>]*>/i);
+    if (htmlMatch) {
+      const insertPos = htmlMatch.index! + htmlMatch[0].length;
+      const defaultHead = `
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>`;
+      repaired = repaired.substring(0, insertPos) + defaultHead + repaired.substring(insertPos);
+      repairs.push('Added default <head> section');
+    }
+  }
+
+  // Add body if missing
+  if (!/<body[^>]*>/i.test(repaired)) {
+    const headCloseMatch = repaired.match(/<\/head\s*>/i);
+    if (headCloseMatch) {
+      const insertPos = headCloseMatch.index! + headCloseMatch[0].length;
+      const afterHead = repaired.substring(insertPos);
+      const htmlCloseMatch = afterHead.match(/<\/html\s*>/i);
+      if (htmlCloseMatch) {
+        const bodyContent = afterHead.substring(0, htmlCloseMatch.index);
+        const afterHtmlClose = afterHead.substring(htmlCloseMatch.index!);
+        repaired = repaired.substring(0, insertPos) + '\n<body>' + bodyContent + '</body>\n' + afterHtmlClose;
+        repairs.push('Wrapped content in <body> tag');
+      }
+    }
+  }
+
+  // Close unclosed tags
+  const balance = checkTagBalance(repaired);
+  if (!balance.balanced && balance.unclosedTags.length > 0) {
+    for (const tag of balance.unclosedTags) {
+      const bodyClose = repaired.lastIndexOf('</body>');
+      const htmlClose = repaired.lastIndexOf('</html>');
+      let insertPos = repaired.length;
+
+      if (bodyClose > -1) {
+        insertPos = bodyClose;
+      } else if (htmlClose > -1) {
+        insertPos = htmlClose;
+      }
+
+      repaired = repaired.substring(0, insertPos) + `</${tag}>` + repaired.substring(insertPos);
+      repairs.push(`Added missing </${tag}> closing tag`);
+    }
+  }
+
+  // Close unclosed script tags
+  const scriptOpens = (repaired.match(/<script[^>]*>/gi) || []).length;
+  const scriptCloses = (repaired.match(/<\/script>/gi) || []).length;
+  if (scriptOpens > scriptCloses) {
+    const diff = scriptOpens - scriptCloses;
+    for (let i = 0; i < diff; i++) {
+      repaired = repaired + '</script>';
+      repairs.push('Added missing </script> closing tag');
+    }
+  }
+
+  // Close unclosed style tags
+  const styleOpens = (repaired.match(/<style[^>]*>/gi) || []).length;
+  const styleCloses = (repaired.match(/<\/style>/gi) || []).length;
+  if (styleOpens > styleCloses) {
+    const diff = styleOpens - styleCloses;
+    for (let i = 0; i < diff; i++) {
+      repaired = repaired + '</style>';
+      repairs.push('Added missing </style> closing tag');
+    }
+  }
+
+  return { content: repaired, repairs, repaired: repairs.length > 0 };
+}
+
+/**
+ * Validate and repair HTML files
+ */
+function validateAndRepairHTMLFiles(
+  files: FileResult[]
+): { files: FileResult[]; repairs: Array<{ path: string; repairs: string[] }> } {
+  const repairedFiles: FileResult[] = [];
+  const allRepairs: Array<{ path: string; repairs: string[] }> = [];
+
+  for (const file of files) {
+    const ext = file.path.split('.').pop()?.toLowerCase();
+
+    if (ext === 'html' || ext === 'htm') {
+      // Check for truncation or balance issues
+      const truncation = detectHTMLTruncation(file.content);
+      const balance = checkTagBalance(file.content);
+
+      if (truncation.truncated || !balance.balanced) {
+        const result = repairHTML(file.content);
+        if (result.repaired) {
+          repairedFiles.push({ path: file.path, content: result.content });
+          allRepairs.push({ path: file.path, repairs: result.repairs });
+          console.log(`[process-job] Auto-repaired ${file.path}: ${result.repairs.join(', ')}`);
+        } else {
+          repairedFiles.push(file);
+        }
+      } else {
+        repairedFiles.push(file);
+      }
+    } else {
+      repairedFiles.push(file);
+    }
+  }
+
+  return { files: repairedFiles, repairs: allRepairs };
+}
+
 function validateFileSyntax(
   path: string,
   content: string
-): { valid: boolean; error?: string } {
+): { valid: boolean; error?: string; canRepair?: boolean } {
   const ext = path.split('.').pop()?.toLowerCase();
 
   if (ext === 'json') {
@@ -193,16 +520,25 @@ function validateFileSyntax(
     }
   }
 
-  // Basic checks for other file types
+  // Enhanced HTML validation
   if (ext === 'html' || ext === 'htm') {
-    const trimmed = content.trim();
-    if (trimmed.endsWith('<') || (trimmed.includes('<') && !trimmed.endsWith('>'))) {
-      const lastOpen = trimmed.lastIndexOf('<');
-      const lastClose = trimmed.lastIndexOf('>');
-      if (lastOpen > lastClose) {
-        return { valid: false, error: 'HTML appears truncated' };
-      }
+    // Check for truncation first
+    const truncation = detectHTMLTruncation(content);
+    if (truncation.truncated) {
+      return { valid: false, error: `HTML truncated: ${truncation.reason}`, canRepair: true };
     }
+
+    // Check tag balance
+    const balance = checkTagBalance(content);
+    if (!balance.balanced) {
+      return {
+        valid: false,
+        error: `Unbalanced HTML: unclosed tags [${balance.unclosedTags.join(', ')}]`,
+        canRepair: true
+      };
+    }
+
+    return { valid: true };
   }
 
   if (ext === 'css') {
@@ -215,6 +551,26 @@ function validateFileSyntax(
 
   return { valid: true };
 }
+
+// Starter template for new projects - ensures all models have a foundation
+const STARTER_TEMPLATE: FileResult = {
+  path: 'index.html',
+  content: `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Project</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-100">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold text-gray-800 mb-4">Welcome</h1>
+        <p class="text-gray-600">Edit this template to build your website.</p>
+    </div>
+</body>
+</html>`
+};
 
 // Agent tools definition (enhanced with edit_file, read_file_section, validate_file)
 const AGENT_TOOLS = [
@@ -448,14 +804,21 @@ Deno.serve(async (req) => {
       return jsonResponse({ message: 'No pending jobs' });
     }
 
-    console.log(`Processing job ${jobData.id} (${jobData.job_type})`);
+    // Initialize logger for this job
+    logger.setContext(jobData.id, serviceClient);
+    await logger.info('Job processing started', {
+      job_type: jobData.job_type,
+      model: jobData.model,
+      prompt_length: jobData.prompt.length,
+      files_count: jobData.current_files?.length || 0
+    });
 
     // Get the user's API key from active session
-    console.log(`[process-job] Getting API key for user ${jobData.user_id}`);
+    await logger.info('Retrieving API key from session');
     const apiKey = await getApiKeyFromSession(serviceClient, jobData.user_id);
 
     if (!apiKey) {
-      console.error('[process-job] No API key found in session');
+      await logger.error('No API key found in session');
       await serviceClient.rpc('fail_job', {
         p_job_id: jobData.id,
         p_error_message: 'No active session. Please unlock your API key first.',
@@ -463,12 +826,17 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: 'No active session' });
     }
 
-    // Log API key info (partial, for debugging)
-    console.log(`[process-job] API key retrieved: ${apiKey.substring(0, 10)}... (length: ${apiKey.length})`);
+    await logger.info('API key retrieved successfully', {
+      key_prefix: apiKey.substring(0, 10) + '...',
+      key_length: apiKey.length
+    });
 
     // Build request headers for COPPA/GDPR compliance
     const headers = buildRequestHeaders(apiKey, jobData);
-    console.log(`[process-job] Using model: ${jobData.model}`);
+    await logger.info('Request headers built', {
+      model: jobData.model,
+      training_opt_out: jobData.training_opt_out
+    });
 
     let result: { files: FileResult[]; description: string; iterations?: number };
 
@@ -706,6 +1074,53 @@ async function runSimpleGeneration(
     parsed.files = mergeFiles(jobData.current_files, parsed.files);
   }
 
+  // Auto-repair HTML files (handles truncation and missing tags from LLMs)
+  const repairResult = validateAndRepairHTMLFiles(parsed.files);
+  if (repairResult.repairs.length > 0) {
+    await logger.info('Auto-repaired HTML files', {
+      repairs: repairResult.repairs.map(r => `${r.path}: ${r.repairs.join(', ')}`)
+    });
+    parsed.files = repairResult.files;
+  }
+
+  // CRITICAL: Ensure index.html exists
+  const hasIndexHtml = parsed.files.some(f => f.path === 'index.html' || f.path === './index.html');
+  if (!hasIndexHtml) {
+    await logger.warn('Simple mode: No index.html found - creating fallback', {
+      files: parsed.files.map(f => f.path)
+    });
+
+    // Create a minimal index.html
+    const otherFiles = parsed.files.filter(f => f.path.endsWith('.html'));
+    const links = otherFiles.length > 0
+      ? otherFiles.map(f => `<li><a href="${f.path}" class="text-blue-500 hover:underline">${f.path}</a></li>`).join('\n        ')
+      : '<li class="text-gray-500">No additional pages</li>';
+
+    const fallbackHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-100 p-8">
+    <div class="max-w-2xl mx-auto">
+        <h1 class="text-3xl font-bold text-gray-800 mb-4">Project Files</h1>
+        <p class="text-gray-600 mb-4">The AI created the following files:</p>
+        <ul class="list-disc list-inside space-y-2">
+        ${links}
+        </ul>
+        <div class="mt-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+            <p class="text-yellow-800 text-sm">Note: The AI didn't create a proper index.html. You may want to regenerate.</p>
+        </div>
+    </div>
+</body>
+</html>`;
+
+    parsed.files.unshift({ path: 'index.html', content: fallbackHtml });
+  }
+
   return parsed;
 }
 
@@ -722,9 +1137,10 @@ async function runAgentGeneration(
   const isNewProject = !jobData.current_files || jobData.current_files.length === 0;
 
   // Initialize or restore state
+  // For new projects, start with a minimal HTML template so all models have a foundation
   let workingFiles = jobData.working_files.length > 0
     ? jobData.working_files
-    : (isNewProject ? [] : [...jobData.current_files]);
+    : (isNewProject ? [{ ...STARTER_TEMPLATE }] : [...jobData.current_files]);
 
   let messages = jobData.messages.length > 0
     ? jobData.messages
@@ -736,7 +1152,17 @@ async function runAgentGeneration(
 
   // Add initial context if starting fresh
   if (iteration === 0) {
-    if (!isNewProject) {
+    if (isNewProject) {
+      // Tell the agent about the starter template
+      messages.push({
+        role: 'user',
+        content: `STARTER TEMPLATE PROVIDED:\n- index.html (basic HTML5 + Tailwind CSS template)\n\nYou can read and modify this file. Build upon it to create the requested website.`,
+      });
+      messages.push({
+        role: 'assistant',
+        content: "I see the starter template. I'll build upon index.html to create the requested website, adding styles and JavaScript as needed.",
+      });
+    } else {
       const fileList = jobData.current_files.map(f => `- ${f.path}`).join('\n');
       messages.push({
         role: 'user',
@@ -755,12 +1181,21 @@ async function runAgentGeneration(
     // Check time budget
     const elapsed = Date.now() - startTime;
     if (elapsed > MAX_EXECUTION_MS) {
-      console.log(`Time budget exceeded at iteration ${iteration}, saving state`);
+      await logger.warn('Time budget exceeded, saving state for resume', {
+        iteration,
+        elapsed_ms: elapsed,
+        max_ms: MAX_EXECUTION_MS
+      });
       break;
     }
 
     iteration++;
-    console.log(`Agent iteration ${iteration}/${jobData.max_iterations}`);
+    const iterationStart = Date.now();
+    await logger.info(`Starting iteration ${iteration}/${jobData.max_iterations}`, {
+      elapsed_ms: elapsed,
+      messages_count: messages.length,
+      working_files_count: workingFiles.length
+    });
 
     // Update heartbeat
     await client
@@ -776,8 +1211,11 @@ async function runAgentGeneration(
         tool_choice: 'auto',
       };
 
-      console.log(`[process-job] Calling OpenRouter with model: ${jobData.model}`);
-      console.log(`[process-job] Message count: ${messages.length}`);
+      await logger.info('Calling OpenRouter API', {
+        model: jobData.model,
+        messages_count: messages.length,
+        has_tools: true
+      });
 
       // Retry logic for transient errors
       let response: Response | null = null;
@@ -815,33 +1253,68 @@ async function runAgentGeneration(
       }
 
       if (!response) {
+        await logger.error('All API retries failed', { last_error: lastError, retries: maxRetries });
         throw new Error(`All ${maxRetries} retries failed: ${lastError}`);
       }
 
       if (!response.ok) {
         const errorBody = await response.text();
-        console.error(`[process-job] OpenRouter error: ${response.status} - ${errorBody}`);
         let errorMsg = `API error: ${response.status}`;
+        let errorDetails: Record<string, unknown> = { status: response.status, body: errorBody.substring(0, 500) };
         try {
           const errorJson = JSON.parse(errorBody);
           errorMsg = errorJson.error?.message || errorJson.message || errorMsg;
+          errorDetails = { ...errorDetails, parsed_error: errorJson.error };
         } catch {}
+        await logger.error('OpenRouter API error', errorDetails);
         throw new Error(errorMsg);
       }
 
       const data = await response.json();
-      console.log(`[process-job] OpenRouter response data:`, JSON.stringify(data).substring(0, 500));
+      const apiDuration = Date.now() - iterationStart;
+
+      // Log detailed model response info
+      await logger.info('OpenRouter API response received', {
+        status: response.status,
+        api_duration_ms: apiDuration,
+        model: data.model,
+        usage: data.usage,
+        finish_reason: data.choices?.[0]?.finish_reason,
+        has_tool_calls: !!data.choices?.[0]?.message?.tool_calls,
+        tool_calls_count: data.choices?.[0]?.message?.tool_calls?.length || 0,
+        content_length: data.choices?.[0]?.message?.content?.length || 0
+      });
+
+      // Store model info for analytics
+      await client
+        .from('jobs')
+        .update({
+          model_info: {
+            model_used: data.model,
+            usage: data.usage,
+            last_iteration_duration_ms: apiDuration
+          }
+        })
+        .eq('id', jobData.id);
 
       const message = data.choices?.[0]?.message;
 
       if (!message) {
-        console.error(`[process-job] No message in response. Full data:`, JSON.stringify(data));
+        await logger.error('Empty response from model', {
+          full_response: JSON.stringify(data).substring(0, 1000),
+          choices_count: data.choices?.length || 0
+        });
         throw new Error('Empty response from agent. Check logs for API response.');
       }
 
       const toolCalls = message.tool_calls;
 
       if (toolCalls && toolCalls.length > 0) {
+        await logger.info('Processing tool calls', {
+          tool_calls_count: toolCalls.length,
+          tools: toolCalls.map((tc: { function: { name: string } }) => tc.function.name)
+        });
+
         messages.push({
           role: 'assistant',
           content: message.content || null,
@@ -852,7 +1325,22 @@ async function runAgentGeneration(
           const toolName = toolCall.function.name;
           const toolArgs = JSON.parse(toolCall.function.arguments || '{}');
 
+          await logger.debug(`Executing tool: ${toolName}`, {
+            tool: toolName,
+            args_keys: Object.keys(toolArgs),
+            path: toolArgs.path
+          });
+
+          const toolStart = Date.now();
           const result = executeAgentTool(toolName, toolArgs, workingFiles);
+          const toolDuration = Date.now() - toolStart;
+
+          await logger.info(`Tool executed: ${toolName}`, {
+            tool: toolName,
+            success: result.success !== false,
+            duration_ms: toolDuration,
+            finished: result.finished || false
+          });
 
           messages.push({
             role: 'tool',
@@ -863,17 +1351,20 @@ async function runAgentGeneration(
           if (result.finished) {
             finished = true;
             finalSummary = result.summary;
+            await logger.info('Agent signaled completion', { summary: finalSummary });
             break;
           }
 
           // Update working files from write/delete/edit
           if (toolName === 'write_file') {
             workingFiles = updateWorkingFiles(workingFiles, toolArgs.path, toolArgs.content);
+            await logger.debug('File written', { path: toolArgs.path, size: toolArgs.content?.length });
           } else if (toolName === 'delete_file') {
             workingFiles = workingFiles.filter(f => f.path !== toolArgs.path);
+            await logger.debug('File deleted', { path: toolArgs.path });
           } else if (toolName === 'edit_file' && result.success && result.newContent) {
-            // Apply the edit result to working files
             workingFiles = updateWorkingFiles(workingFiles, toolArgs.path, result.newContent as string);
+            await logger.debug('File edited', { path: toolArgs.path });
           }
         }
       } else if (message.content) {
@@ -906,6 +1397,53 @@ async function runAgentGeneration(
   // Check if we have files
   if (workingFiles.length === 0) {
     throw new Error('Agent produced no files');
+  }
+
+  // Auto-repair HTML files (handles truncation and missing tags from LLMs)
+  const repairResult = validateAndRepairHTMLFiles(workingFiles);
+  if (repairResult.repairs.length > 0) {
+    await logger.info('Auto-repaired HTML files', {
+      repairs: repairResult.repairs.map(r => `${r.path}: ${r.repairs.join(', ')}`)
+    });
+    workingFiles = repairResult.files;
+  }
+
+  // CRITICAL: Ensure index.html exists - this is required for the website to work
+  const hasIndexHtml = workingFiles.some(f => f.path === 'index.html' || f.path === './index.html');
+  if (!hasIndexHtml) {
+    await logger.warn('No index.html found - creating fallback', {
+      files: workingFiles.map(f => f.path)
+    });
+
+    // Create a minimal index.html that links to other files
+    const otherFiles = workingFiles.filter(f => f.path.endsWith('.html'));
+    const links = otherFiles.length > 0
+      ? otherFiles.map(f => `<li><a href="${f.path}" class="text-blue-500 hover:underline">${f.path}</a></li>`).join('\n        ')
+      : '<li class="text-gray-500">No additional pages created</li>';
+
+    const fallbackHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-100 p-8">
+    <div class="max-w-2xl mx-auto">
+        <h1 class="text-3xl font-bold text-gray-800 mb-4">Project Files</h1>
+        <p class="text-gray-600 mb-4">The AI created the following files:</p>
+        <ul class="list-disc list-inside space-y-2">
+        ${links}
+        </ul>
+        <div class="mt-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+            <p class="text-yellow-800 text-sm">Note: The AI didn't create a proper index.html. You may want to regenerate or edit this project.</p>
+        </div>
+    </div>
+</body>
+</html>`;
+
+    workingFiles.unshift({ path: 'index.html', content: fallbackHtml });
   }
 
   return {
@@ -1146,15 +1684,25 @@ async function updateChildSpending(
 function buildNewProjectSystemPrompt(modelId?: string): string {
   const profile = modelId ? getModelProfile(modelId) : getModelProfile('default');
 
+  const criticalRules = `
+CRITICAL RULES:
+1. This is a STATIC WEBSITE builder - you create web projects
+2. index.html is REQUIRED - it is the main entry point that users see first
+3. You may create any file types needed (.html, .css, .js, .json, .txt, .md, etc.)
+4. The main content should be in index.html - other files support it`;
+
   const requirements = `
-- Always include index.html
+REQUIREMENTS:
+- index.html MUST be included (REQUIRED - this is the main page)
 - Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
 - Clean, semantic HTML5
-- Vanilla JavaScript
-- Mobile-responsive`;
+- Vanilla JavaScript (no frameworks)
+- Mobile-responsive design`;
 
   if (profile.promptStyle === 'xml-tags') {
-    return `<role>You are an expert Frontend Developer. Create a complete static website.</role>
+    return `<role>You are an expert Frontend Developer. Create a complete STATIC WEBSITE.</role>
+
+<critical>${criticalRules}</critical>
 
 <output_format>
 Return ONLY valid JSON:
@@ -1170,10 +1718,12 @@ Return ONLY valid JSON:
 <requirements>${requirements}
 </requirements>
 
-<critical>Output ONLY the JSON object. No markdown, no explanation.</critical>`;
+<important>Output ONLY the JSON object. No markdown, no explanation. index.html is REQUIRED.</important>`;
   }
 
-  return `You are an expert Frontend Developer. Create a complete static website.
+  return `You are an expert Frontend Developer. Create a complete STATIC WEBSITE.
+
+${criticalRules}
 
 ### Output Format
 Return **ONLY** valid JSON:
@@ -1186,10 +1736,9 @@ Return **ONLY** valid JSON:
   "description": "Brief description"
 }
 \`\`\`
+${requirements}
 
-### Requirements${requirements}
-
-**CRITICAL**: Output ONLY the JSON object. No explanation.`;
+**IMPORTANT**: Output ONLY the JSON object. No explanation. index.html is REQUIRED.`;
 }
 
 function buildRevisionSystemPrompt(files: FileResult[], modelId?: string): string {
@@ -1275,39 +1824,53 @@ EFFICIENCY:
 - Use read_file_section for large files (>200 lines)
 - Call validate_file after edits`;
 
+  const criticalRules = `
+CRITICAL RULES - YOU MUST FOLLOW THESE:
+1. This is a STATIC WEBSITE builder. You create web projects.
+2. index.html MUST exist - it is the main entry point. NEVER delete it.
+3. You may create any file types needed (.html, .css, .js, .json, .txt, .md, etc.)
+4. The main content should be in index.html - users see this first.
+5. No server-side code (no PHP, Python, etc.) - static files only.`;
+
   if (profile.promptStyle === 'xml-tags') {
-    prompt += `<role>You are an expert Frontend Developer agent.</role>
+    prompt += `<role>You are an expert Frontend Developer agent building STATIC WEBSITES.</role>
+
+<critical>${criticalRules}</critical>
 
 <tools>${toolDocs}
 </tools>
 
 <workflow>
-1. ${isNewProject ? 'Plan the file structure' : 'Use list_files() to understand the project'}
-2. Make changes using edit_file (preferred) or write_file
-3. Validate with validate_file
+1. ${isNewProject ? 'Read index.html to see the starter template' : 'Use list_files() to understand the project'}
+2. Use edit_file to modify index.html with the requested content
+3. Add styles.css and script.js if needed
 4. Call finish() when done
 </workflow>
 ${efficiencyRules}
 <requirements>
-- Include index.html
-- Use Tailwind CSS
-- Mobile-responsive
+- index.html MUST be the main page (REQUIRED)
+- Use Tailwind CSS via CDN: <script src="https://cdn.tailwindcss.com"></script>
+- Mobile-responsive design
+- Clean, semantic HTML5
 </requirements>`;
   } else {
-    prompt += `You are an expert Frontend Developer agent.
+    prompt += `You are an expert Frontend Developer agent building STATIC WEBSITES.
+
+${criticalRules}
 
 ### Tools${toolDocs}
 
 ### Workflow
-1. ${isNewProject ? 'Plan the file structure' : 'Use list_files() to understand the project'}
-2. Make changes using edit_file (preferred) or write_file
-3. Validate with validate_file
+1. ${isNewProject ? 'Read index.html to see the starter template' : 'Use list_files() to understand the project'}
+2. Use edit_file to modify index.html with the requested content
+3. Add styles.css and script.js if needed
 4. Call finish() when done
 ${efficiencyRules}
 ### Requirements
-- Include index.html
-- Use Tailwind CSS
-- Mobile-responsive`;
+- index.html MUST be the main page (REQUIRED)
+- Use Tailwind CSS via CDN: <script src="https://cdn.tailwindcss.com"></script>
+- Mobile-responsive design
+- Clean, semantic HTML5`;
   }
 
   return prompt;

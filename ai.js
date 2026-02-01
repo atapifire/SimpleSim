@@ -18,6 +18,8 @@ import {
     mergeWithEdits,
     validateFileSyntax,
     validateGenerationResult,
+    validateAndRepairFiles,
+    validateAndRepairHTML,
     detectTruncation
 } from './file-ops.js';
 
@@ -86,8 +88,8 @@ export async function generateProject(prompt, currentFiles) {
 
         devLog('Merged files:', mergeResult.applied);
 
-        // Post-generation validation
-        const postValidation = validateGenerationResult(currentFiles, result.files);
+        // Post-generation validation with auto-repair for HTML
+        const postValidation = validateGenerationResult(currentFiles, result.files, { autoRepair: true });
         if (!postValidation.valid) {
             devError('Post-generation issues:', postValidation.issues);
             for (const issue of postValidation.issues) {
@@ -100,6 +102,64 @@ export async function generateProject(prompt, currentFiles) {
                 result.files = attemptTruncationRecovery(currentFiles, result.files);
             }
         }
+
+        // If auto-repair was applied, use the repaired files
+        if (postValidation.repaired && postValidation.files) {
+            devLog('Applied HTML auto-repair:', postValidation.repairs);
+            for (const repair of postValidation.repairs || []) {
+                thinking.log('info', `Auto-repaired ${repair.path}: ${repair.repairs.join(', ')}`);
+            }
+            result.files = postValidation.files;
+        }
+    }
+
+    // Auto-repair HTML files for new projects (not just revisions)
+    if (!isRevision && result.files) {
+        const repairResult = validateAndRepairFiles(result.files);
+        if (repairResult.repairs.length > 0) {
+            devLog('Applied HTML auto-repair to new project:', repairResult.repairs);
+            for (const repair of repairResult.repairs) {
+                thinking.log('info', `Auto-repaired ${repair.path}: ${repair.repairs.join(', ')}`);
+            }
+            result.files = repairResult.files;
+        }
+    }
+
+    // CRITICAL: Ensure index.html exists - this is required for the website to work
+    const hasIndexHtml = result.files?.some(f => f.path === 'index.html' || f.path === './index.html');
+    if (!hasIndexHtml && result.files) {
+        devError('No index.html found - creating fallback');
+        thinking.log('warning', 'AI did not create index.html - adding fallback');
+
+        // Create a minimal index.html
+        const otherHtmlFiles = result.files.filter(f => f.path.endsWith('.html'));
+        const links = otherHtmlFiles.length > 0
+            ? otherHtmlFiles.map(f => `<li><a href="${f.path}" class="text-blue-500 hover:underline">${f.path}</a></li>`).join('\n        ')
+            : '<li class="text-gray-500">No additional pages</li>';
+
+        const fallbackHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Project</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gray-100 p-8">
+    <div class="max-w-2xl mx-auto">
+        <h1 class="text-3xl font-bold text-gray-800 mb-4">Project Files</h1>
+        <p class="text-gray-600 mb-4">The AI created the following files:</p>
+        <ul class="list-disc list-inside space-y-2">
+        ${links}
+        </ul>
+        <div class="mt-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+            <p class="text-yellow-800 text-sm">Note: The AI didn't create a proper index.html. You may want to regenerate.</p>
+        </div>
+    </div>
+</body>
+</html>`;
+
+        result.files.unshift({ path: 'index.html', content: fallbackHtml });
     }
 
     return result;
@@ -148,12 +208,21 @@ RULES:
 function buildNewProjectPrompt(modelProfile) {
     const style = modelProfile?.promptStyle || 'markdown';
 
+    // Critical rules for all models (especially important for weaker models)
+    const criticalRules = `
+CRITICAL RULES (MUST FOLLOW):
+1. This is a STATIC WEBSITE builder - you create web projects
+2. index.html is REQUIRED - it is the main entry point that users see first
+3. You may create any file types needed (.html, .css, .js, .json, .txt, .md, etc.)
+4. The main content should be in index.html - other files support it`;
+
     // Base requirements (same for all models)
     const requirements = `
-- Always include index.html as entry point
+REQUIREMENTS:
+- index.html MUST be included (REQUIRED - main page)
 - Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
 - Write clean, semantic HTML5
-- Use vanilla JavaScript
+- Use vanilla JavaScript (no frameworks)
 - Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs
 - Make it mobile-responsive
 - Include basic interactivity where appropriate
@@ -162,7 +231,9 @@ function buildNewProjectPrompt(modelProfile) {
     // Model-specific prompt formatting
     if (style === 'xml-tags') {
         // Claude-optimized prompt with XML tags
-        return `<role>You are an expert Frontend Developer. Create a complete static website.</role>
+        return `<role>You are an expert Frontend Developer. Create a complete STATIC WEBSITE.</role>
+
+<critical>${criticalRules}</critical>
 
 <output_format>
 Return ONLY valid JSON matching this schema:
@@ -179,11 +250,13 @@ Return ONLY valid JSON matching this schema:
 <requirements>${requirements}
 </requirements>
 
-<critical>Output ONLY the JSON object. No markdown code blocks, no explanation.</critical>`;
+<important>Output ONLY the JSON object. No markdown code blocks, no explanation. index.html is REQUIRED.</important>`;
     }
 
-    // Default markdown-style prompt (GPT, Gemini, etc.)
-    return `You are an expert Frontend Developer. Create a complete static website.
+    // Default markdown-style prompt (GPT, Gemini, Llama, etc.)
+    return `You are an expert Frontend Developer. Create a complete STATIC WEBSITE.
+
+${criticalRules}
 
 ### Output Format
 Return **ONLY** valid JSON (no markdown, no code blocks):
@@ -197,10 +270,9 @@ Return **ONLY** valid JSON (no markdown, no code blocks):
   "description": "Brief description (max 10 words)"
 }
 \`\`\`
+${requirements}
 
-### Requirements${requirements}
-
-**CRITICAL**: Output ONLY the JSON object. No explanation before or after.`;
+**IMPORTANT**: Output ONLY the JSON object. No explanation. index.html is REQUIRED.`;
 }
 
 /**

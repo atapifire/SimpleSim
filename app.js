@@ -261,15 +261,20 @@ function injectJobProgressUI() {
     container.id = 'job-progress-container';
     container.className = 'fixed bottom-32 sm:bottom-24 left-1/2 -translate-x-1/2 z-40 hidden';
     container.innerHTML = `
-        <div class="bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-2xl shadow-2xl p-3 sm:p-4 w-72 sm:w-80 max-w-[90vw]">
+        <div class="bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-2xl shadow-2xl p-3 sm:p-4 w-72 sm:w-96 max-w-[95vw]">
             <div class="flex items-center justify-between mb-2 sm:mb-3">
                 <div class="flex items-center gap-2">
                     <div id="job-status-indicator" class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
                     <span id="job-status-text" class="text-xs sm:text-sm font-medium text-white">Processing...</span>
                 </div>
-                <button id="btn-cancel-job" class="text-gray-400 hover:text-red-400 transition-colors p-1" title="Cancel job">
-                    <i class="fa-solid fa-times"></i>
-                </button>
+                <div class="flex items-center gap-1">
+                    <button id="btn-toggle-logs" class="text-gray-400 hover:text-blue-400 transition-colors p-1" title="Show logs">
+                        <i class="fa-solid fa-terminal text-xs"></i>
+                    </button>
+                    <button id="btn-cancel-job" class="text-gray-400 hover:text-red-400 transition-colors p-1" title="Cancel job">
+                        <i class="fa-solid fa-times"></i>
+                    </button>
+                </div>
             </div>
 
             <div id="job-progress-bar-container" class="mb-3 hidden">
@@ -279,6 +284,17 @@ function injectJobProgressUI() {
                 </div>
                 <div class="h-1.5 bg-gray-800 rounded-full overflow-hidden">
                     <div id="job-progress-bar" class="h-full bg-purple-500 transition-all duration-300" style="width: 0%"></div>
+                </div>
+            </div>
+
+            <!-- Processing Logs Panel (collapsible) -->
+            <div id="job-logs-panel" class="hidden mb-3">
+                <div class="text-xs text-gray-500 mb-1 flex justify-between items-center">
+                    <span>Processing Log</span>
+                    <span id="job-model-info" class="text-gray-600 text-[10px]"></span>
+                </div>
+                <div id="job-logs-content" class="bg-gray-950 rounded-lg p-2 max-h-40 overflow-y-auto text-[10px] sm:text-xs font-mono space-y-1">
+                    <div class="text-gray-600">Waiting for logs...</div>
                 </div>
             </div>
 
@@ -302,6 +318,73 @@ function injectJobProgressUI() {
 
     // Cancel button handler
     document.getElementById('btn-cancel-job')?.addEventListener('click', handleCancelJob);
+
+    // Toggle logs panel
+    document.getElementById('btn-toggle-logs')?.addEventListener('click', () => {
+        const panel = document.getElementById('job-logs-panel');
+        const btn = document.getElementById('btn-toggle-logs');
+        if (panel && btn) {
+            panel.classList.toggle('hidden');
+            btn.classList.toggle('text-blue-400');
+            btn.classList.toggle('text-gray-400');
+        }
+    });
+}
+
+// Update job logs display
+function updateJobLogs(logs, modelInfo) {
+    const content = document.getElementById('job-logs-content');
+    const modelInfoEl = document.getElementById('job-model-info');
+
+    if (!content) return;
+
+    if (!logs || logs.length === 0) {
+        content.innerHTML = '<div class="text-gray-600">Waiting for logs...</div>';
+        return;
+    }
+
+    // Build log entries HTML
+    const html = logs.map(log => {
+        const levelColors = {
+            'info': 'text-blue-400',
+            'warn': 'text-yellow-400',
+            'error': 'text-red-400',
+            'debug': 'text-gray-500'
+        };
+        const color = levelColors[log.level] || 'text-gray-400';
+        const time = log.duration_ms ? `+${(log.duration_ms / 1000).toFixed(1)}s` : '';
+        const dataStr = log.data ? ` <span class="text-gray-600">${JSON.stringify(log.data).slice(0, 100)}</span>` : '';
+
+        return `<div class="${color}"><span class="text-gray-600">${time}</span> ${escapeHtml(log.message)}${dataStr}</div>`;
+    }).join('');
+
+    content.innerHTML = html;
+
+    // Auto-scroll to bottom
+    content.scrollTop = content.scrollHeight;
+
+    // Update model info if available
+    if (modelInfoEl && modelInfo) {
+        const parts = [];
+        if (modelInfo.model_used) {
+            // Extract short model name
+            const shortModel = modelInfo.model_used.split('/').pop()?.split(':')[0] || modelInfo.model_used;
+            parts.push(shortModel);
+        }
+        if (modelInfo.usage?.total_tokens) {
+            parts.push(`${modelInfo.usage.total_tokens} tokens`);
+        }
+        if (modelInfo.last_iteration_duration_ms) {
+            parts.push(`${(modelInfo.last_iteration_duration_ms / 1000).toFixed(1)}s`);
+        }
+        modelInfoEl.textContent = parts.join(' | ');
+    }
+}
+
+// Helper to escape HTML
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function showJobProgress(job) {
@@ -487,6 +570,9 @@ async function checkForPendingJobs() {
                         updateJobProgressUI(state.currentJob);
                     }
                 },
+                onLog: (logs, modelInfo) => {
+                    updateJobLogs(logs, modelInfo);
+                },
                 onComplete: async (result) => {
                     devLog('Background job completed:', result);
                     hideJobProgress();
@@ -506,8 +592,10 @@ async function checkForPendingJobs() {
                         : 'Generation complete';
                     showToast(modeLabel);
                 },
-                onError: (error) => {
+                onError: (error, logs) => {
                     devError('Background job failed:', error);
+                    // Keep logs visible on error for debugging
+                    if (logs) updateJobLogs(logs);
                     hideJobProgress();
                     state.currentJob = null;
                     clearLastJobProjectId(); // Clear the remembered project
@@ -584,12 +672,16 @@ async function autoQueueCurrentGeneration() {
             onStatusChange: (status) => {
                 fallbackCleanup(status);
             },
+            onLog: (logs, modelInfo) => {
+                updateJobLogs(logs, modelInfo);
+            },
             onComplete: async (result) => {
                 devLog('Auto-queued job completed:', result);
                 await loadProject(ctx.projectId, true);
             },
-            onError: (error) => {
+            onError: (error, logs) => {
                 devError('Auto-queued job failed:', error);
+                if (logs) updateJobLogs(logs);
             }
         });
 
@@ -700,6 +792,9 @@ async function handleSend(isRetry = false) {
                     job.max_iterations = progress.maxIterations;
                     updateJobProgressUI(job);
                 },
+                onLog: (logs, modelInfo) => {
+                    updateJobLogs(logs, modelInfo);
+                },
                 onComplete: async (result) => {
                     devLog('Background job completed:', result);
                     hideJobProgress();
@@ -721,8 +816,10 @@ async function handleSend(isRetry = false) {
                         : 'Generation complete';
                     showToast(modeLabel);
                 },
-                onError: (error) => {
+                onError: (error, logs) => {
                     devError('Background job failed:', error);
+                    // Keep logs visible on error for debugging
+                    if (logs) updateJobLogs(logs);
                     hideJobProgress();
                     state.currentJob = null;
                     clearLastJobProjectId(); // Clear the remembered project
