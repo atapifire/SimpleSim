@@ -27,7 +27,7 @@ const STARTER_TEMPLATE = {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>My Project</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.twind.style" crossorigin></script>
 </head>
 <body class="min-h-screen bg-gray-100">
     <div class="container mx-auto px-4 py-8">
@@ -448,7 +448,7 @@ CHANGE STRATEGY:
     const requirements = `
 REQUIREMENTS:
 - index.html MUST be the main page (REQUIRED - never delete)
-- Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
+- Use Twind (Tailwind-compatible): <script src="https://cdn.twind.style" crossorigin></script>
 - Write clean, semantic HTML5
 - Use vanilla JavaScript (no frameworks)
 - Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs (NO base64 data URLs)
@@ -836,7 +836,7 @@ export async function runAgent(prompt, currentFiles) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Project</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.twind.style" crossorigin></script>
 </head>
 <body class="min-h-screen bg-gray-100 p-8">
     <div class="max-w-2xl mx-auto">

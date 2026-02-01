@@ -8,6 +8,18 @@ import { showToast } from './utils.js';
 import { devLog, devError } from './thinking.js';
 
 /**
+ * Check if the API returned an error indicating it's not available
+ * This handles both dev environments (vite without vercel) and production issues
+ */
+function isApiUnavailableError(error) {
+    const msg = error?.message?.toLowerCase() || '';
+    return msg.includes('failed to fetch') ||
+           msg.includes('network error') ||
+           msg.includes('404') ||
+           msg.includes('function_invocation_failed');
+}
+
+/**
  * Create a GitHub repository for a project
  */
 export async function createGitHubRepo(projectId, name) {
@@ -30,11 +42,19 @@ export async function createGitHubRepo(projectId, name) {
         body: JSON.stringify({ projectId, name })
     });
 
-    const data = await response.json();
+    // Handle non-JSON responses (e.g., server errors)
+    let data;
+    try {
+        const text = await response.text();
+        data = text ? JSON.parse(text) : {};
+    } catch (parseError) {
+        devError('Failed to parse GitHub API response:', parseError);
+        throw new Error('Invalid response from GitHub API');
+    }
 
     if (!response.ok) {
         devError('GitHub repo creation failed:', data);
-        throw new Error(data.error || 'Failed to create repository');
+        throw new Error(data.error || `Failed to create repository (HTTP ${response.status})`);
     }
 
     devLog('GitHub repo created:', data);
@@ -64,11 +84,19 @@ export async function commitToGitHub(projectId, files, message) {
         body: JSON.stringify({ projectId, files, message })
     });
 
-    const data = await response.json();
+    // Handle non-JSON responses (e.g., server errors)
+    let data;
+    try {
+        const text = await response.text();
+        data = text ? JSON.parse(text) : {};
+    } catch (parseError) {
+        devError('Failed to parse GitHub commit response:', parseError);
+        throw new Error('Invalid response from GitHub API');
+    }
 
     if (!response.ok) {
         devError('GitHub commit failed:', data);
-        throw new Error(data.error || 'Failed to commit');
+        throw new Error(data.error || `Failed to commit (HTTP ${response.status})`);
     }
 
     devLog('GitHub commit successful:', data);
@@ -133,7 +161,10 @@ export async function autoCreateRepoIfEnabled(projectId, projectName) {
         return result;
     } catch (error) {
         devError('Auto-create repo failed:', error);
-        showToast(`GitHub repo failed: ${error.message}`);
+        // Skip silently if API is unavailable (e.g., running vite dev without vercel)
+        if (!isApiUnavailableError(error)) {
+            showToast(`GitHub repo failed: ${error.message}`);
+        }
         return null;
     }
 }

@@ -1,7 +1,7 @@
 import { state, supabase, events, initAuth, signInWithGitHub, signOut } from './state.js';
 import { security } from './security.js';
 import { showToast, setLoading, setupVoiceInput } from './utils.js';
-import { initSettings, startPinFlow } from './settings.js';
+import { initSettings, startPinFlow, checkSessionOnLoad } from './settings.js';
 import { initProjects, loadProject, getCurrentFiles, createProject, createVersion } from './projects.js';
 import { generateProject, checkCredits, fetchModelsWithCredits, refactorLargeFile, analyzeProjectHealth, formatTokenCount } from './ai.js';
 import { thinking, isDev, devLog, devError } from './thinking.js';
@@ -52,6 +52,9 @@ async function init() {
 
     // Initialize background job queue
     await initJobQueue();
+
+    // Check if session needs unlock (user has server key but API key not in memory)
+    checkSessionOnLoad();
 
     // Dev mode indicator
     if (isDev) {
@@ -510,10 +513,10 @@ function setupJobEventListeners() {
         // Refresh models now that we have an API key
         try {
             devLog('Refreshing models after session unlock...');
-            const [fetchedModels, credits] = await Promise.all([
-                fetchModelsWithCredits(),
-                checkCredits()
-            ]);
+            // fetchModelsWithCredits now returns { models, credits } to avoid duplicate API calls
+            const result = await fetchModelsWithCredits();
+            const fetchedModels = result.models;
+            const credits = result.credits;
 
             // Update the model dropdown if it's cached
             if (fetchedModels && fetchedModels.length > 0) {
@@ -1200,10 +1203,10 @@ function setupModelSelector() {
             list.innerHTML = '<div class="text-gray-500 text-xs text-center py-4"><i class="fa-solid fa-spinner fa-spin mr-2"></i>Loading...</div>';
 
             try {
-                const [fetchedModels, credits] = await Promise.all([
-                    fetchModelsWithCredits(),
-                    checkCredits()
-                ]);
+                // fetchModelsWithCredits now returns { models, credits } to avoid duplicate API calls
+                const result = await fetchModelsWithCredits();
+                const fetchedModels = result.models;
+                const credits = result.credits;
 
                 models = fetchedModels;
 

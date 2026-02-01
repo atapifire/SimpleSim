@@ -402,7 +402,7 @@ function repairHTML(content: string): { content: string; repairs: string[]; repa
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Page</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.twind.style" crossorigin></script>
 </head>`;
       repaired = repaired.substring(0, insertPos) + defaultHead + repaired.substring(insertPos);
       repairs.push('Added default <head> section');
@@ -562,7 +562,7 @@ const STARTER_TEMPLATE: FileResult = {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>My Project</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.twind.style" crossorigin></script>
 </head>
 <body class="min-h-screen bg-gray-100">
     <div class="container mx-auto px-4 py-8">
@@ -1103,8 +1103,36 @@ async function runSimpleGeneration(
   }
 
   if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new Error(error.error?.message || `API error: ${response.status}`);
+    const errorBody = await response.text();
+    let errorMsg = `API error: ${response.status}`;
+    let providerError = '';
+    try {
+      const errorJson = JSON.parse(errorBody);
+      errorMsg = errorJson.error?.message || errorJson.message || errorMsg;
+      providerError = errorJson.error?.metadata?.raw || '';
+    } catch {}
+
+    await logger.error('Simple mode API error', {
+      status: response.status,
+      error: errorMsg,
+      provider_error: providerError
+    });
+
+    // Handle auth errors
+    if (response.status === 401 || errorMsg.includes('User not found')) {
+      throw new Error(`OpenRouter auth failed: ${errorMsg}. Please re-setup your API key.`);
+    }
+
+    // Handle provider errors
+    if (response.status === 502 || errorMsg.toLowerCase().includes('provider')) {
+      let helpfulMsg = `Provider returned error for model "${jobData.model}"`;
+      if (providerError) helpfulMsg += `: ${providerError}`;
+      else if (errorMsg !== `API error: ${response.status}`) helpfulMsg += `: ${errorMsg}`;
+      helpfulMsg += '. Try selecting a different model.';
+      throw new Error(helpfulMsg);
+    }
+
+    throw new Error(providerError ? `${errorMsg} (${providerError})` : errorMsg);
   }
 
   const data = await response.json();
@@ -1149,7 +1177,7 @@ async function runSimpleGeneration(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Project</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.twind.style" crossorigin></script>
 </head>
 <body class="min-h-screen bg-gray-100 p-8">
     <div class="max-w-2xl mx-auto">
@@ -1308,10 +1336,15 @@ async function runAgentGeneration(
         const errorBody = await response.text();
         let errorMsg = `API error: ${response.status}`;
         let errorDetails: Record<string, unknown> = { status: response.status, body: errorBody.substring(0, 500) };
+        let providerError = '';
         try {
           const errorJson = JSON.parse(errorBody);
+          // OpenRouter returns errors in multiple formats
+          // Standard: { error: { message: "...", code: "..." } }
+          // Provider pass-through: { error: { message: "...", metadata: { raw: "..." } } }
           errorMsg = errorJson.error?.message || errorJson.message || errorMsg;
-          errorDetails = { ...errorDetails, parsed_error: errorJson.error };
+          providerError = errorJson.error?.metadata?.raw || '';
+          errorDetails = { ...errorDetails, parsed_error: errorJson.error, provider_error: providerError };
         } catch {}
         await logger.error('OpenRouter API error', errorDetails);
 
@@ -1323,7 +1356,35 @@ async function runAgentGeneration(
           console.error('[process-job] 3. The key reconstruction from shares failed');
           throw new Error(`OpenRouter auth failed: ${errorMsg}. Please re-setup your API key.`);
         }
-        throw new Error(errorMsg);
+
+        // Handle provider errors with more context
+        if (response.status === 502 || errorMsg.toLowerCase().includes('provider')) {
+          const modelFamily = getModelFamily(jobData.model);
+          console.error(`[process-job] Provider error for model ${jobData.model} (${modelFamily})`);
+          console.error('[process-job] This usually means:');
+          console.error('[process-job] 1. The model is not available for your account tier');
+          console.error('[process-job] 2. The provider (e.g., Anthropic, OpenAI) rejected the request');
+          console.error('[process-job] 3. The model may be overloaded or temporarily unavailable');
+
+          // Build a helpful error message
+          let helpfulMsg = `Provider returned error for model "${jobData.model}"`;
+          if (providerError) {
+            helpfulMsg += `: ${providerError}`;
+          } else if (errorMsg !== `API error: ${response.status}`) {
+            helpfulMsg += `: ${errorMsg}`;
+          }
+          helpfulMsg += '. Try selecting a different model or check your OpenRouter credits.';
+          throw new Error(helpfulMsg);
+        }
+
+        // Handle rate limiting
+        if (response.status === 429) {
+          throw new Error('Rate limit exceeded. Please wait a moment and try again.');
+        }
+
+        // Generic error with full context
+        const fullError = providerError ? `${errorMsg} (${providerError})` : errorMsg;
+        throw new Error(fullError);
       }
 
       const data = await response.json();
@@ -1483,7 +1544,7 @@ async function runAgentGeneration(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Project</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.twind.style" crossorigin></script>
 </head>
 <body class="min-h-screen bg-gray-100 p-8">
     <div class="max-w-2xl mx-auto">
@@ -1795,7 +1856,7 @@ CRITICAL RULES:
   const requirements = `
 REQUIREMENTS:
 - index.html MUST be included (REQUIRED - this is the main page)
-- Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
+- Use Twind (Tailwind-compatible): <script src="https://cdn.twind.style" crossorigin></script>
 - Clean, semantic HTML5
 - Vanilla JavaScript (no frameworks)
 - Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs (NO base64 data URLs)
@@ -1965,7 +2026,7 @@ CRITICAL RULES - YOU MUST FOLLOW THESE:
 ${efficiencyRules}
 <requirements>
 - index.html MUST be the main page (REQUIRED)
-- Use Tailwind CSS via CDN: <script src="https://cdn.tailwindcss.com"></script>
+- Use Twind (Tailwind-compatible): <script src="https://cdn.twind.style" crossorigin></script>
 - Images: https://picsum.photos/WIDTH/HEIGHT (NO base64 data URLs)
 - Mobile-responsive design
 - Clean, semantic HTML5
@@ -1986,7 +2047,7 @@ ${criticalRules}
 ${efficiencyRules}
 ### Requirements
 - index.html MUST be the main page (REQUIRED)
-- Use Tailwind CSS via CDN: <script src="https://cdn.tailwindcss.com"></script>
+- Use Twind (Tailwind-compatible): <script src="https://cdn.twind.style" crossorigin></script>
 - Images: https://picsum.photos/WIDTH/HEIGHT (NO base64 data URLs)
 - Mobile-responsive design
 - Clean, semantic HTML5

@@ -149,7 +149,7 @@ export async function generateProject(prompt, currentFiles) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Project</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.twind.style" crossorigin></script>
 </head>
 <body class="min-h-screen bg-gray-100 p-8">
     <div class="max-w-2xl mx-auto">
@@ -227,7 +227,7 @@ CRITICAL RULES (MUST FOLLOW):
     const requirements = `
 REQUIREMENTS:
 - index.html MUST be included (REQUIRED - main page)
-- Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
+- Use Twind (Tailwind-compatible): <script src="https://cdn.twind.style" crossorigin></script>
 - Write clean, semantic HTML5
 - Use vanilla JavaScript (no frameworks)
 - Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs (NO base64 data URLs)
@@ -1054,6 +1054,21 @@ function parseAIResponse(content) {
         devLog('JSON fix attempt failed');
     }
 
+    // Strategy 5.5: Repair truncated JSON strings
+    // Handles "Unterminated string in JSON at position X" errors
+    try {
+        const repaired = repairTruncatedJSON(content);
+        if (repaired !== content) {
+            const result = JSON.parse(repaired);
+            if (validateParsedResult(result)) {
+                devLog('Successfully repaired truncated JSON');
+                return result;
+            }
+        }
+    } catch (e) {
+        devLog('Truncated JSON repair failed:', e.message);
+    }
+
     // Strategy 6: Try to extract individual complete file objects (handles truncated responses)
     try {
         const files = [];
@@ -1138,6 +1153,199 @@ function validateParsedResult(result) {
     // Check that at least one file has path and content
     const hasValidFile = result.files.some(f => f.path && typeof f.content === 'string');
     return hasValidFile;
+}
+
+/**
+ * Repair truncated JSON by closing open strings, arrays, and objects
+ * Handles common LLM truncation patterns like "Unterminated string"
+ * @param {string} content - The possibly truncated JSON content
+ * @returns {string} - Repaired JSON string
+ */
+function repairTruncatedJSON(content) {
+    // Find JSON start
+    const jsonStart = content.indexOf('{');
+    if (jsonStart === -1) return content;
+
+    let json = content.slice(jsonStart);
+
+    // Track state: are we inside a string?
+    let inString = false;
+    let escapeNext = false;
+    let lastValidPos = 0;
+    let braceDepth = 0;
+    let bracketDepth = 0;
+
+    for (let i = 0; i < json.length; i++) {
+        const char = json[i];
+
+        if (escapeNext) {
+            escapeNext = false;
+            continue;
+        }
+
+        if (char === '\\' && inString) {
+            escapeNext = true;
+            continue;
+        }
+
+        if (char === '"' && !escapeNext) {
+            inString = !inString;
+            if (!inString) {
+                // Just closed a string, this is a valid position
+                lastValidPos = i;
+            }
+            continue;
+        }
+
+        if (!inString) {
+            if (char === '{') {
+                braceDepth++;
+            } else if (char === '}') {
+                braceDepth--;
+                lastValidPos = i;
+            } else if (char === '[') {
+                bracketDepth++;
+            } else if (char === ']') {
+                bracketDepth--;
+                lastValidPos = i;
+            } else if (char === ',' || char === ':') {
+                lastValidPos = i;
+            }
+        }
+    }
+
+    // If we ended inside a string, the JSON is truncated
+    if (inString) {
+        devLog('Detected truncated string, attempting repair...');
+
+        // Find the last complete file object before truncation
+        // Look for the pattern: }, { or }] which indicates end of a file object
+        let repairPoint = lastValidPos;
+
+        // Search backwards from truncation point for a good repair location
+        const jsonUpToTruncation = json.slice(0, json.length);
+
+        // Find the last complete "content": "..." pattern
+        const lastCompleteContent = jsonUpToTruncation.lastIndexOf('"}');
+        if (lastCompleteContent > 0) {
+            // Check if there's a complete file object ending here
+            const afterContent = jsonUpToTruncation.slice(lastCompleteContent + 2, lastCompleteContent + 10);
+            if (afterContent.includes('}') || afterContent.includes(',')) {
+                repairPoint = lastCompleteContent + 2;
+            }
+        }
+
+        // Try to close the JSON structure properly
+        let repaired = json.slice(0, repairPoint);
+
+        // Close any open string
+        if (inString) {
+            repaired += '"';
+        }
+
+        // If we're mid-object (after "content": started but not finished)
+        // We need to close the string and the object
+        if (repaired.endsWith('": "') || repaired.match(/:\s*"[^"]*$/)) {
+            // We're mid-value, close it
+            repaired += '"';
+        }
+
+        // Count remaining open braces and brackets
+        let openBraces = 0;
+        let openBrackets = 0;
+        let inStr = false;
+        let esc = false;
+
+        for (const c of repaired) {
+            if (esc) { esc = false; continue; }
+            if (c === '\\' && inStr) { esc = true; continue; }
+            if (c === '"' && !esc) { inStr = !inStr; continue; }
+            if (!inStr) {
+                if (c === '{') openBraces++;
+                else if (c === '}') openBraces--;
+                else if (c === '[') openBrackets++;
+                else if (c === ']') openBrackets--;
+            }
+        }
+
+        // Clean up trailing incomplete syntax
+        repaired = repaired.replace(/,\s*$/, ''); // Remove trailing comma
+        repaired = repaired.replace(/:\s*$/, ': ""'); // Close incomplete key-value
+        repaired = repaired.replace(/"[^"]*$/, '"'); // Close incomplete string
+
+        // Close remaining brackets and braces
+        for (let i = 0; i < openBrackets; i++) {
+            repaired += ']';
+        }
+        for (let i = 0; i < openBraces; i++) {
+            repaired += '}';
+        }
+
+        // Try to parse and validate
+        try {
+            const test = JSON.parse(repaired);
+            if (test && test.files && Array.isArray(test.files) && test.files.length > 0) {
+                devLog('Repaired JSON has', test.files.length, 'file(s)');
+                return repaired;
+            }
+        } catch (e) {
+            devLog('Repair attempt did not produce valid JSON:', e.message);
+        }
+
+        // Fallback: try to extract just complete file objects
+        return extractCompleteFilesAsJSON(json);
+    }
+
+    // Not truncated mid-string, just close any unbalanced structures
+    if (braceDepth > 0 || bracketDepth > 0) {
+        let repaired = json;
+        for (let i = 0; i < bracketDepth; i++) {
+            repaired += ']';
+        }
+        for (let i = 0; i < braceDepth; i++) {
+            repaired += '}';
+        }
+        return repaired;
+    }
+
+    return content;
+}
+
+/**
+ * Extract complete file objects from partially valid JSON
+ * @param {string} json - JSON string that may be truncated
+ * @returns {string} - Valid JSON with extracted files
+ */
+function extractCompleteFilesAsJSON(json) {
+    const files = [];
+
+    // Match complete file objects with path and content
+    // This regex handles escaped characters in content
+    const fileRegex = /\{\s*"path"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"\s*(?:,\s*"action"\s*:\s*"([^"]+)")?\s*\}/g;
+
+    let match;
+    while ((match = fileRegex.exec(json)) !== null) {
+        try {
+            const path = JSON.parse(`"${match[1]}"`);
+            const content = JSON.parse(`"${match[2]}"`);
+            const action = match[3] || 'modify';
+
+            files.push({ path, content, action });
+        } catch (e) {
+            // Skip malformed file objects
+            devLog('Skipping malformed file object');
+        }
+    }
+
+    if (files.length > 0) {
+        devLog('Extracted', files.length, 'complete file(s) from truncated response');
+        return JSON.stringify({
+            files: files,
+            description: 'Recovered from truncated response'
+        });
+    }
+
+    return json; // Return original if no files found
 }
 
 /**
@@ -1271,10 +1479,13 @@ export async function fetchModelsWithCredits() {
             devLog('Paid tier or unlimited: showing all', models.length, 'models');
         }
 
-        return models.sort((a, b) => a.name.localeCompare(b.name));
+        const sortedModels = models.sort((a, b) => a.name.localeCompare(b.name));
+
+        // Return both models and credits info to avoid duplicate API calls
+        return { models: sortedModels, credits: creditsInfo };
     } catch (e) {
         devError('Failed to fetch models:', e);
-        return [];
+        return { models: [], credits: null };
     }
 }
 

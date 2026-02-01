@@ -1,7 +1,8 @@
 import { state, events } from './state.js';
 import { security } from './security.js';
 import { showToast, setLoading } from './utils.js';
-import { storeServerKey, storeShareBLocally, unlockSession, hasServerKey } from './job-queue.js';
+import { storeServerKey, storeShareBLocally, unlockSession, hasServerKey, sessionNeedsUnlock } from './job-queue.js';
+import { devLog } from './thinking.js';
 
 const PIN_MODAL_HTML = `
 <div id="pin-modal" class="fixed inset-0 z-[70] hidden flex items-center justify-center p-4">
@@ -54,10 +55,32 @@ function setupSecurityListeners() {
     d.btnCancelPin?.addEventListener('click', closePinModal);
     d.pinBackdrop?.addEventListener('click', closePinModal);
     d.btnConfirmPin?.addEventListener('click', handlePinConfirm);
-    
-    [d.inputPinEntry, d.inputPinSetup, d.inputApiKey].forEach(el => 
+
+    [d.inputPinEntry, d.inputPinSetup, d.inputApiKey].forEach(el =>
         el?.addEventListener('keydown', e => { if(e.key === 'Enter') handlePinConfirm(); })
     );
+
+    // Listen for session-needs-unlock event (fired when session exists but API key not in memory)
+    events.addEventListener('session-needs-unlock', (e) => {
+        devLog('Session needs unlock event received:', e.detail);
+        // Don't show the modal automatically - just log it
+        // The user will see the unlock button in the UI
+        // Showing a modal on page load is disruptive
+    });
+}
+
+/**
+ * Check if session needs unlock on page load and show a subtle prompt
+ * Called from app.js after initialization
+ */
+export function checkSessionOnLoad() {
+    if (sessionNeedsUnlock()) {
+        devLog('Session needs unlock on load - showing notification');
+        // Show a toast notification instead of blocking modal
+        showToast('Session expired. Click unlock to continue using background jobs.', 5000);
+        return true;
+    }
+    return false;
 }
 
 export function startPinFlow(mode, customTitle) {
@@ -230,7 +253,8 @@ async function handlePinConfirm() {
             setLoading(false);
             callbacks.updateUI();
             showToast("Session unlocked for 2 hours");
-            events.dispatchEvent(new CustomEvent('session-unlocked'));
+            // Note: unlockSession() already dispatches 'session-unlocked' event
+            // Don't dispatch it again here to avoid duplicate API calls
             if (state.pendingPrompt) events.dispatchEvent(new CustomEvent('retry-generation'));
         } catch (e) {
             setLoading(false);

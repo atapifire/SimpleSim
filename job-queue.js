@@ -626,20 +626,51 @@ export async function unlockSession(pin, options = {}) {
         throw new Error(data.error || 'Failed to unlock session');
     }
 
-    // Store session token
-    sessionStorage.setItem('simplesim_session_token', data.sessionToken);
-    state.sessionUnlocked = true;
-    state.sessionExpiresAt = new Date(data.expiresAt);
-
-    // Store API key in memory for client-side use (model fetching, etc.)
-    // This is more secure than localStorage - only in memory, cleared on page close
-    if (data.apiKey) {
-        state.serverApiKey = data.apiKey;
-        devLog('API key stored in memory for session');
+    // CRITICAL: Validate that API key was returned
+    if (!data.apiKey) {
+        devError('Unlock succeeded but no API key in response!');
+        devError('Response keys:', Object.keys(data));
+        throw new Error('Session unlock failed: No API key returned from server. The server may have failed to decrypt your key shares.');
     }
 
+    // Validate API key format (OpenRouter keys start with sk-or-)
+    if (typeof data.apiKey !== 'string') {
+        devError('API key is not a string:', typeof data.apiKey);
+        throw new Error('Session unlock failed: Invalid API key type');
+    }
+
+    if (!data.apiKey.startsWith('sk-or-')) {
+        devError('Invalid API key format returned:', data.apiKey?.substring(0, 20) + '...');
+        devError('Key length:', data.apiKey.length);
+        throw new Error('Session unlock failed: Invalid API key format. The key may have been corrupted during storage.');
+    }
+
+    // Additional length check - OpenRouter keys are typically 40-60 chars
+    if (data.apiKey.length < 20 || data.apiKey.length > 200) {
+        devError('API key has unusual length:', data.apiKey.length);
+        devLog('Expected: 40-60 characters');
+    }
+
+    devLog('API key validation passed:', {
+        prefix: data.apiKey.substring(0, 10) + '...',
+        length: data.apiKey.length
+    });
+
+    // Store session token
+    sessionStorage.setItem('simplesim_session_token', data.sessionToken);
+
+    // Store API key in memory BEFORE setting sessionUnlocked flag
+    // This ensures getApiKey() will return the correct value when event fires
+    state.serverApiKey = data.apiKey;
+    state.sessionExpiresAt = new Date(data.expiresAt);
+    state.sessionUnlocked = true;
+
+    devLog('API key stored in memory for session');
     devLog('Session unlocked until', data.expiresAt);
     devLog('state.sessionUnlocked =', state.sessionUnlocked);
+    devLog('state.serverApiKey present =', !!state.serverApiKey);
+
+    // Dispatch event AFTER all state is fully set
     events.dispatchEvent(new CustomEvent('session-unlocked'));
 
     return data;
@@ -655,7 +686,13 @@ export async function unlockSession(pin, options = {}) {
 export function getApiKey() {
     // First try server key (from unlocked session)
     if (state.sessionUnlocked && state.serverApiKey) {
+        devLog('getApiKey: Using server session key');
         return state.serverApiKey;
+    }
+
+    // Log why server key wasn't used (for debugging)
+    if (state.sessionUnlocked && !state.serverApiKey) {
+        devError('getApiKey: Session marked as unlocked but no API key in state!');
     }
 
     // Fall back to client-side key (legacy)
@@ -664,12 +701,14 @@ export function getApiKey() {
         // security module stores decrypted key in memory
         const securityModule = window.SimpleSim?.security;
         if (securityModule?.isUnlocked()) {
+            devLog('getApiKey: Using legacy client-side key');
             return securityModule.getKey();
         }
     } catch (e) {
         devLog('Could not get client-side key:', e.message);
     }
 
+    devLog('getApiKey: No key available');
     return null;
 }
 
@@ -677,12 +716,159 @@ export function getApiKey() {
  * Check if any API key is available (either system)
  */
 export function hasApiKeyAccess() {
-    return !!(state.sessionUnlocked && state.serverApiKey) ||
-           !!(window.SimpleSim?.security?.isUnlocked());
+    const hasServerKey = !!(state.sessionUnlocked && state.serverApiKey);
+    const hasLegacyKey = !!(window.SimpleSim?.security?.isUnlocked());
+
+    if (!hasServerKey && !hasLegacyKey) {
+        devLog('hasApiKeyAccess: No key available',
+            '(sessionUnlocked:', state.sessionUnlocked,
+            ', serverApiKey:', !!state.serverApiKey,
+            ', legacyUnlocked:', hasLegacyKey, ')');
+    }
+
+    return hasServerKey || hasLegacyKey;
+}
+
+/**
+ * Validate API key format
+ * @param {string} key - The API key to validate
+ * @returns {{valid: boolean, error?: string}}
+ */
+export function validateApiKeyFormat(key) {
+    if (!key) {
+        return { valid: false, error: 'Key is null or undefined' };
+    }
+    if (typeof key !== 'string') {
+        return { valid: false, error: `Key is not a string (got ${typeof key})` };
+    }
+    if (!key.startsWith('sk-or-')) {
+        return { valid: false, error: `Key does not start with sk-or- (starts with: ${key.substring(0, 10)}...)` };
+    }
+    if (key.length < 20) {
+        return { valid: false, error: `Key too short (${key.length} chars, expected 40+)` };
+    }
+    if (key.length > 200) {
+        return { valid: false, error: `Key suspiciously long (${key.length} chars)` };
+    }
+    return { valid: true };
+}
+
+/**
+ * Diagnostic function - call from browser console: diagnoseSession()
+ * Checks the state of the session and API key configuration
+ */
+export async function diagnoseSession() {
+    console.log('=== SESSION DIAGNOSTIC ===');
+    console.log('Timestamp:', new Date().toISOString());
+
+    // 1. Check user state
+    console.log('\n1. USER STATE:');
+    console.log('   User ID:', state.user?.id || 'NOT LOGGED IN');
+    console.log('   Session token:', state.session?.access_token ? 'SET' : 'NOT SET');
+
+    // 2. Check server key configuration
+    console.log('\n2. SERVER KEY CONFIG:');
+    const hasShareB = !!localStorage.getItem('simplesim_share_b');
+    console.log('   hasServerKey setting:', state.settings?.hasServerKey || false);
+    console.log('   Share B in localStorage:', hasShareB);
+
+    if (hasShareB) {
+        try {
+            const shareData = JSON.parse(localStorage.getItem('simplesim_share_b'));
+            console.log('   Share B data keys:', Object.keys(shareData));
+            console.log('   Share B salt length:', shareData.salt?.length || 'N/A');
+            console.log('   Share B data length:', shareData.data?.length || 'N/A');
+        } catch (e) {
+            console.error('   Share B parse error:', e.message);
+        }
+    }
+
+    // 3. Check session state
+    console.log('\n3. SESSION STATE:');
+    console.log('   sessionUnlocked:', state.sessionUnlocked);
+    console.log('   serverApiKey present:', !!state.serverApiKey);
+    console.log('   sessionExpiresAt:', state.sessionExpiresAt?.toISOString() || 'NOT SET');
+
+    if (state.sessionExpiresAt) {
+        const remaining = state.sessionExpiresAt.getTime() - Date.now();
+        console.log('   Time remaining:', remaining > 0 ? `${Math.round(remaining / 60000)} minutes` : 'EXPIRED');
+    }
+
+    // 4. Validate API key if present
+    if (state.serverApiKey) {
+        console.log('\n4. API KEY VALIDATION:');
+        const validation = validateApiKeyFormat(state.serverApiKey);
+        console.log('   Valid format:', validation.valid);
+        if (!validation.valid) {
+            console.error('   Validation error:', validation.error);
+        }
+        console.log('   Key prefix:', state.serverApiKey.substring(0, 15) + '...');
+        console.log('   Key length:', state.serverApiKey.length);
+    }
+
+    // 5. Check getApiKey() result
+    console.log('\n5. getApiKey() CHECK:');
+    const key = getApiKey();
+    console.log('   Returns:', key ? `key (${key.length} chars)` : 'null');
+
+    // 6. Check legacy key system
+    console.log('\n6. LEGACY KEY SYSTEM:');
+    const legacyUnlocked = window.SimpleSim?.security?.isUnlocked() || false;
+    console.log('   Legacy unlocked:', legacyUnlocked);
+    if (legacyUnlocked) {
+        const legacyKey = window.SimpleSim?.security?.getKey();
+        console.log('   Legacy key present:', !!legacyKey);
+    }
+
+    // 7. Test OpenRouter API (if key available)
+    if (key) {
+        console.log('\n7. OPENROUTER API TEST:');
+        try {
+            const response = await fetch('https://openrouter.ai/api/v1/auth/key', {
+                headers: { 'Authorization': `Bearer ${key}` }
+            });
+            console.log('   Status:', response.status);
+            if (response.ok) {
+                const data = await response.json();
+                console.log('   Credits limit:', data.data?.limit);
+                console.log('   Credits usage:', data.data?.usage);
+                console.log('   API KEY IS VALID');
+            } else {
+                const errorText = await response.text();
+                console.error('   API ERROR:', errorText.substring(0, 200));
+            }
+        } catch (e) {
+            console.error('   Request failed:', e.message);
+        }
+    }
+
+    console.log('\n=== END DIAGNOSTIC ===');
+
+    return {
+        user: !!state.user,
+        hasShareB,
+        sessionUnlocked: state.sessionUnlocked,
+        hasApiKey: !!state.serverApiKey,
+        keyValid: state.serverApiKey ? validateApiKeyFormat(state.serverApiKey).valid : false
+    };
+}
+
+// Make diagnoseSession available globally for console debugging
+if (typeof window !== 'undefined') {
+    window.diagnoseSession = diagnoseSession;
 }
 
 /**
  * Check if session is active
+ *
+ * IMPORTANT: This only checks if a session EXISTS in the database.
+ * The actual API key is stored in memory (state.serverApiKey) and is lost on page refresh.
+ *
+ * We return TWO pieces of info:
+ * - hasDbSession: Whether a valid session exists in the database
+ * - hasApiKey: Whether we have the API key in memory (ready to use)
+ *
+ * If hasDbSession=true but hasApiKey=false, the user needs to re-enter their PIN to unlock.
  */
 export async function checkSessionStatus() {
     if (!state.user) return false;
@@ -702,15 +888,40 @@ export async function checkSessionStatus() {
             return false;
         }
 
-        const session = sessions?.[0];
-        const isActive = !!session;
-        state.sessionUnlocked = isActive;
+        const hasDbSession = sessions && sessions.length > 0;
+        const hasApiKey = !!state.serverApiKey;
 
-        if (session) {
-            state.sessionExpiresAt = new Date(session.expires_at);
+        if (hasDbSession) {
+            state.sessionExpiresAt = new Date(sessions[0].expires_at);
         }
 
-        return isActive;
+        // CRITICAL FIX: Only mark session as unlocked if we actually have the API key
+        // The database session existing doesn't mean we have the decrypted key in memory
+        if (hasDbSession && !hasApiKey) {
+            devLog('Session exists in DB but API key not in memory - need to re-unlock');
+            state.sessionUnlocked = false;
+
+            // Dispatch event so UI can prompt for PIN
+            events.dispatchEvent(new CustomEvent('session-needs-unlock', {
+                detail: {
+                    expiresAt: state.sessionExpiresAt,
+                    reason: 'API key not in memory (page refresh)'
+                }
+            }));
+
+            return false; // Session not usable until re-unlocked
+        }
+
+        state.sessionUnlocked = hasDbSession && hasApiKey;
+
+        devLog('Session status:', {
+            hasDbSession,
+            hasApiKey,
+            sessionUnlocked: state.sessionUnlocked,
+            expiresAt: state.sessionExpiresAt?.toISOString()
+        });
+
+        return state.sessionUnlocked;
     } catch (e) {
         devLog('Session check failed:', e.message);
         state.sessionUnlocked = false;
@@ -1194,6 +1405,51 @@ export function clearServerKey() {
     localStorage.removeItem('simplesim_share_b');
     state.sessionUnlocked = false;
     devLog('Server key cleared');
+}
+
+/**
+ * Full reset of server key configuration
+ * Call this to completely clear the key setup and start fresh
+ * Note: This only clears client-side data. Server-side Share A remains
+ * until the user sets up a new key (which overwrites it).
+ */
+export function resetServerKeySetup() {
+    devLog('Performing full server key reset...');
+
+    // Clear local Share B
+    localStorage.removeItem('simplesim_share_b');
+
+    // Clear session state
+    sessionStorage.removeItem('simplesim_session_token');
+    state.sessionUnlocked = false;
+    state.serverApiKey = null;
+    state.sessionExpiresAt = null;
+
+    // Clear settings flag
+    if (state.settings) {
+        state.settings.hasServerKey = false;
+    }
+
+    devLog('Server key reset complete. User must re-setup their API key.');
+
+    return { success: true, message: 'Server key configuration cleared. Please set up your API key again.' };
+}
+
+// Make resetServerKeySetup available globally for console debugging
+if (typeof window !== 'undefined') {
+    window.resetServerKeySetup = resetServerKeySetup;
+}
+
+/**
+ * Check if session exists but needs unlock (API key not in memory)
+ * Returns true if user should be prompted to enter PIN
+ */
+export function sessionNeedsUnlock() {
+    const hasShareB = !!localStorage.getItem('simplesim_share_b');
+    const hasApiKey = !!state.serverApiKey;
+
+    // Session needs unlock if we have the local share but no API key in memory
+    return hasShareB && !hasApiKey;
 }
 
 /**

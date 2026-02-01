@@ -1,7 +1,10 @@
 import { state, events } from './state.js';
 import { security } from './security.js';
 import { showToast } from './utils.js';
-import { initSecurityModal, startPinFlow as _startPinFlow } from './security-modal.js';
+import { initSecurityModal, startPinFlow as _startPinFlow, checkSessionOnLoad } from './security-modal.js';
+
+// Re-export checkSessionOnLoad for app.js
+export { checkSessionOnLoad };
 import {
     storeServerKey,
     storeShareBLocally,

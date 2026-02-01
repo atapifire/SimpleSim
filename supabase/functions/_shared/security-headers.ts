@@ -11,10 +11,10 @@ export const CSP_POLICY = [
   // Only allow scripts from same origin and trusted CDNs
   "default-src 'self'",
 
-  // Scripts: Tailwind CDN, Font Awesome, and inline (required for Supabase)
-  "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://esm.sh https://cdnjs.cloudflare.com",
+  // Scripts: Twind CDN (Tailwind-compatible), Font Awesome, and inline (required for Supabase)
+  "script-src 'self' 'unsafe-inline' https://cdn.twind.style https://esm.sh https://cdnjs.cloudflare.com",
 
-  // Styles: Tailwind, Google Fonts, Font Awesome
+  // Styles: Twind (inline), Google Fonts, Font Awesome
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com",
 
   // Fonts: Google Fonts, Font Awesome
@@ -23,8 +23,9 @@ export const CSP_POLICY = [
   // Images: Picsum (placeholder), data URIs
   "img-src 'self' https://picsum.photos https://*.githubusercontent.com data: blob:",
 
-  // Connect: Only allow API calls to trusted endpoints
-  "connect-src 'self' https://ouvrecllkqtwbtrwyhgw.supabase.co wss://ouvrecllkqtwbtrwyhgw.supabase.co https://openrouter.ai https://api.github.com",
+  // Connect: Allow API calls to trusted endpoints and CDNs (for source maps and library APIs)
+  // Note: Permissive for CDNs since generated code may use various libraries
+  "connect-src 'self' https://ouvrecllkqtwbtrwyhgw.supabase.co wss://ouvrecllkqtwbtrwyhgw.supabase.co https://openrouter.ai https://api.github.com https://*.esm.sh https://*.jsdelivr.net https://*.unpkg.com https://*.cdnjs.cloudflare.com https://cdn.twind.style https://fonts.googleapis.com https://fonts.gstatic.com",
 
   // Frames: Block all framing except preview iframe
   "frame-src 'self' blob:",
