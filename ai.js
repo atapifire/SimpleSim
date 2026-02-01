@@ -22,6 +22,12 @@ import {
     validateAndRepairHTML,
     detectTruncation
 } from './file-ops.js';
+import {
+    PROTOCOL_DATA,
+    TECHNICAL_GUIDELINES,
+    getLibraryInstructions,
+    enhancePromptWithProtocol
+} from './protocol-data.js';
 
 // Timeout for API requests (3 minutes for streaming)
 const API_TIMEOUT = 180000;
@@ -56,8 +62,8 @@ export async function generateProject(prompt, currentFiles) {
 
     // Choose the optimal prompt strategy based on model and project size
     const systemPrompt = isRevision
-        ? buildRevisionPrompt(currentFiles, health, modelProfile)
-        : buildNewProjectPrompt(modelProfile);
+        ? buildRevisionPrompt(currentFiles, health, modelProfile, prompt)
+        : buildNewProjectPrompt(modelProfile, prompt);
 
     let messages = [
         { role: "system", content: systemPrompt },
@@ -205,7 +211,7 @@ RULES:
 /**
  * Build system prompt for new projects with model-specific optimizations
  */
-function buildNewProjectPrompt(modelProfile) {
+function buildNewProjectPrompt(modelProfile, userPrompt = '') {
     const style = modelProfile?.promptStyle || 'markdown';
 
     // Critical rules for all models (especially important for weaker models)
@@ -214,7 +220,8 @@ CRITICAL RULES (MUST FOLLOW):
 1. This is a STATIC WEBSITE builder - you create web projects
 2. index.html is REQUIRED - it is the main entry point that users see first
 3. You may create any file types needed (.html, .css, .js, .json, .txt, .md, etc.)
-4. The main content should be in index.html - other files support it`;
+4. The main content should be in index.html - other files support it
+5. Don't ask questions - the user cannot see your questions`;
 
     // Base requirements (same for all models)
     const requirements = `
@@ -223,10 +230,13 @@ REQUIREMENTS:
 - Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
 - Write clean, semantic HTML5
 - Use vanilla JavaScript (no frameworks)
-- Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs
+- Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs (NO base64 data URLs)
 - Make it mobile-responsive
 - Include basic interactivity where appropriate
 - Keep files under 200 lines each when possible`;
+
+    // Get context-aware technical guidelines
+    const technicalNotes = buildTechnicalNotes(userPrompt);
 
     // Model-specific prompt formatting
     if (style === 'xml-tags') {
@@ -249,7 +259,7 @@ Return ONLY valid JSON matching this schema:
 
 <requirements>${requirements}
 </requirements>
-
+${technicalNotes ? `\n<technical_notes>${technicalNotes}</technical_notes>` : ''}
 <important>Output ONLY the JSON object. No markdown code blocks, no explanation. index.html is REQUIRED.</important>`;
     }
 
@@ -271,14 +281,54 @@ Return **ONLY** valid JSON (no markdown, no code blocks):
 }
 \`\`\`
 ${requirements}
-
+${technicalNotes ? `\n### Technical Notes\n${technicalNotes}` : ''}
 **IMPORTANT**: Output ONLY the JSON object. No explanation. index.html is REQUIRED.`;
+}
+
+/**
+ * Build context-aware technical notes based on user prompt
+ */
+function buildTechnicalNotes(prompt) {
+    const notes = [];
+    const promptLower = prompt.toLowerCase();
+
+    // 3D/Three.js projects
+    if (promptLower.includes('three') || promptLower.includes('3d') || promptLower.includes('webgl')) {
+        notes.push('For Three.js/3D:');
+        notes.push('- Use WASD for desktop movement, nipple.js (https://esm.sh/nipplejs) for mobile');
+        notes.push('- Clamp vertical camera rotation to prevent over-rotation');
+        notes.push('- Prioritize smooth frame rates and responsive controls');
+    }
+
+    // Game projects
+    if (promptLower.includes('game') || promptLower.includes('simulation')) {
+        notes.push('For games/simulations:');
+        notes.push('- Focus on functionality and user experience over visual flair');
+        notes.push('- Use requestAnimationFrame for render/update loops');
+        notes.push('- Ensure responsive controls on both desktop and mobile');
+    }
+
+    // Audio/Sound
+    if (promptLower.includes('sound') || promptLower.includes('audio') || promptLower.includes('music')) {
+        notes.push('For audio:');
+        notes.push('- Use WebAudio API directly (AudioContext, GainNode, etc.)');
+        notes.push('- Do NOT use howler.js or other audio libraries');
+    }
+
+    // External libraries
+    if (promptLower.includes('library') || promptLower.includes('import') || promptLower.includes('package')) {
+        notes.push('For external libraries:');
+        notes.push('- Use esm.sh CDN with import maps');
+        notes.push('- Example: import { x } from "https://esm.sh/package-name"');
+    }
+
+    return notes.length > 0 ? notes.join('\n') : '';
 }
 
 /**
  * Build system prompt for revisions - uses efficient edit format with model-specific optimizations
  */
-function buildRevisionPrompt(currentFiles, health, modelProfile) {
+function buildRevisionPrompt(currentFiles, health, modelProfile, userPrompt = '') {
     const style = modelProfile?.promptStyle || 'markdown';
     const useEditFormat = modelProfile?.preferEditFormat !== false;
 
@@ -304,7 +354,11 @@ SEARCH/REPLACE RULES:
 - Search strings must be UNIQUE in the file
 - Include 1-2 lines of context if needed for uniqueness
 - Search must match EXACTLY (including whitespace)
+- Don't ask questions - the user cannot see your questions
 ` : '';
+
+    // Get context-aware technical guidelines
+    const technicalNotes = buildTechnicalNotes(userPrompt);
 
     // Model-specific prompt formatting
     if (style === 'xml-tags') {
@@ -338,11 +392,13 @@ Return ONLY valid JSON:
 - "edit": Search/replace for surgical changes (preferred for small changes)
 </actions>
 ${editFormatInstructions ? `<edit_format>${editFormatInstructions}</edit_format>` : ''}
+${technicalNotes ? `<technical_notes>${technicalNotes}</technical_notes>` : ''}
 <rules>
 - Only return files that CHANGE - never include unchanged files
 - For modify/add: return COMPLETE file content
 - Preserve existing functionality unless asked to change
 - Files marked [LARGE]: consider splitting when making changes
+- NO base64 data URLs for images - use https://picsum.photos/WIDTH/HEIGHT
 </rules>`;
     }
 
@@ -375,11 +431,13 @@ Return **ONLY** valid JSON:
 - \`delete\`: Remove file
 - \`edit\`: Search/replace for surgical changes
 ${editFormatInstructions}
+${technicalNotes ? `### Technical Notes\n${technicalNotes}\n` : ''}
 ### Rules
 1. Only return files that CHANGE
 2. For modify/add: return COMPLETE content
 3. Preserve existing functionality
 4. Files marked [LARGE]: consider splitting
+5. NO base64 data URLs for images
 
 **CRITICAL**: Output ONLY the JSON. No explanation.`;
 }

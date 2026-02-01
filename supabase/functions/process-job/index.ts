@@ -1041,8 +1041,8 @@ async function runSimpleGeneration(
   const isRevision = jobData.current_files && jobData.current_files.length > 0;
 
   const systemPrompt = isRevision
-    ? buildRevisionSystemPrompt(jobData.current_files, jobData.model)
-    : buildNewProjectSystemPrompt(jobData.model);
+    ? buildRevisionSystemPrompt(jobData.current_files, jobData.model, jobData.prompt)
+    : buildNewProjectSystemPrompt(jobData.model, jobData.prompt);
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -1191,7 +1191,7 @@ async function runAgentGeneration(
 
   let messages = jobData.messages.length > 0
     ? jobData.messages
-    : [{ role: 'system', content: buildAgentSystemPrompt(isNewProject, jobData.safety_system_prompt, jobData.model) }];
+    : [{ role: 'system', content: buildAgentSystemPrompt(isNewProject, jobData.safety_system_prompt, jobData.model, jobData.prompt) }];
 
   let iteration = jobData.current_iteration;
   let finished = false;
@@ -1736,8 +1736,52 @@ async function updateChildSpending(
     .eq('child_user_id', jobData.user_id);
 }
 
+// ============================================
+// Technical Notes Helper (context-aware guidelines)
+// ============================================
+
+/**
+ * Build context-aware technical notes based on user prompt
+ */
+function buildTechnicalNotes(prompt: string): string {
+  const notes: string[] = [];
+  const promptLower = prompt.toLowerCase();
+
+  // 3D/Three.js projects
+  if (promptLower.includes('three') || promptLower.includes('3d') || promptLower.includes('webgl')) {
+    notes.push('For Three.js/3D:');
+    notes.push('- Use WASD for desktop movement, nipple.js (https://esm.sh/nipplejs) for mobile');
+    notes.push('- Clamp vertical camera rotation to prevent over-rotation');
+    notes.push('- Prioritize smooth frame rates and responsive controls');
+  }
+
+  // Game projects
+  if (promptLower.includes('game') || promptLower.includes('simulation')) {
+    notes.push('For games/simulations:');
+    notes.push('- Focus on functionality and user experience over visual flair');
+    notes.push('- Use requestAnimationFrame for render/update loops');
+    notes.push('- Ensure responsive controls on both desktop and mobile');
+  }
+
+  // Audio/Sound
+  if (promptLower.includes('sound') || promptLower.includes('audio') || promptLower.includes('music')) {
+    notes.push('For audio:');
+    notes.push('- Use WebAudio API directly (AudioContext, GainNode, etc.)');
+    notes.push('- Do NOT use howler.js or other audio libraries');
+  }
+
+  // External libraries
+  if (promptLower.includes('library') || promptLower.includes('import') || promptLower.includes('package')) {
+    notes.push('For external libraries:');
+    notes.push('- Use esm.sh CDN with import maps');
+    notes.push('- Example: import { x } from "https://esm.sh/package-name"');
+  }
+
+  return notes.length > 0 ? notes.join('\n') : '';
+}
+
 // System prompt builders with model-specific optimizations
-function buildNewProjectSystemPrompt(modelId?: string): string {
+function buildNewProjectSystemPrompt(modelId?: string, userPrompt?: string): string {
   const profile = modelId ? getModelProfile(modelId) : getModelProfile('default');
 
   const criticalRules = `
@@ -1745,7 +1789,8 @@ CRITICAL RULES:
 1. This is a STATIC WEBSITE builder - you create web projects
 2. index.html is REQUIRED - it is the main entry point that users see first
 3. You may create any file types needed (.html, .css, .js, .json, .txt, .md, etc.)
-4. The main content should be in index.html - other files support it`;
+4. The main content should be in index.html - other files support it
+5. Don't ask questions - the user cannot see your questions`;
 
   const requirements = `
 REQUIREMENTS:
@@ -1753,7 +1798,11 @@ REQUIREMENTS:
 - Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
 - Clean, semantic HTML5
 - Vanilla JavaScript (no frameworks)
+- Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs (NO base64 data URLs)
 - Mobile-responsive design`;
+
+  // Get context-aware technical notes
+  const technicalNotes = userPrompt ? buildTechnicalNotes(userPrompt) : '';
 
   if (profile.promptStyle === 'xml-tags') {
     return `<role>You are an expert Frontend Developer. Create a complete STATIC WEBSITE.</role>
@@ -1773,7 +1822,7 @@ Return ONLY valid JSON:
 
 <requirements>${requirements}
 </requirements>
-
+${technicalNotes ? `\n<technical_notes>${technicalNotes}</technical_notes>` : ''}
 <important>Output ONLY the JSON object. No markdown, no explanation. index.html is REQUIRED.</important>`;
   }
 
@@ -1793,11 +1842,11 @@ Return **ONLY** valid JSON:
 }
 \`\`\`
 ${requirements}
-
+${technicalNotes ? `\n### Technical Notes\n${technicalNotes}` : ''}
 **IMPORTANT**: Output ONLY the JSON object. No explanation. index.html is REQUIRED.`;
 }
 
-function buildRevisionSystemPrompt(files: FileResult[], modelId?: string): string {
+function buildRevisionSystemPrompt(files: FileResult[], modelId?: string, userPrompt?: string): string {
   const profile = modelId ? getModelProfile(modelId) : getModelProfile('default');
   const fileList = files.map(f => `- ${f.path}`).join('\n');
 
@@ -1807,7 +1856,12 @@ For SMALL changes, use "edit" action with search/replace:
   "path": "file.css",
   "action": "edit",
   "edits": [{ "search": "old text", "replace": "new text" }]
-}` : '';
+}
+- Search strings must be UNIQUE and match EXACTLY
+- Don't ask questions - the user cannot see your questions` : '';
+
+  // Get context-aware technical notes
+  const technicalNotes = userPrompt ? buildTechnicalNotes(userPrompt) : '';
 
   if (profile.promptStyle === 'xml-tags') {
     return `<role>You are an expert Frontend Developer. Modify an existing website.</role>
@@ -1833,7 +1887,8 @@ Return ONLY valid JSON:
 - edit: Search/replace for small changes
 </actions>
 ${editInstructions ? `<edit_format>${editInstructions}</edit_format>` : ''}
-<rules>Only return files that CHANGE.</rules>`;
+${technicalNotes ? `<technical_notes>${technicalNotes}</technical_notes>` : ''}
+<rules>Only return files that CHANGE. NO base64 data URLs for images.</rules>`;
   }
 
   return `You are an expert Frontend Developer. Modify an existing website.
@@ -1856,10 +1911,11 @@ Return **ONLY** valid JSON:
 - \`delete\`: Remove file
 - \`edit\`: Search/replace for small changes
 ${editInstructions}
-Only return files that CHANGE.`;
+${technicalNotes ? `\n### Technical Notes\n${technicalNotes}` : ''}
+Only return files that CHANGE. NO base64 data URLs for images.`;
 }
 
-function buildAgentSystemPrompt(isNewProject: boolean, safetyPrompt: string | null, modelId?: string): string {
+function buildAgentSystemPrompt(isNewProject: boolean, safetyPrompt: string | null, modelId?: string, userPrompt?: string): string {
   const profile = modelId ? getModelProfile(modelId) : getModelProfile('default');
   let prompt = safetyPrompt ? safetyPrompt + '\n\n' : '';
 
@@ -1886,7 +1942,11 @@ CRITICAL RULES - YOU MUST FOLLOW THESE:
 2. index.html MUST exist - it is the main entry point. NEVER delete it.
 3. You may create any file types needed (.html, .css, .js, .json, .txt, .md, etc.)
 4. The main content should be in index.html - users see this first.
-5. No server-side code (no PHP, Python, etc.) - static files only.`;
+5. No server-side code (no PHP, Python, etc.) - static files only.
+6. Don't ask questions - the user cannot see your questions.`;
+
+  // Get context-aware technical notes
+  const technicalNotes = userPrompt ? buildTechnicalNotes(userPrompt) : '';
 
   if (profile.promptStyle === 'xml-tags') {
     prompt += `<role>You are an expert Frontend Developer agent building STATIC WEBSITES.</role>
@@ -1906,9 +1966,11 @@ ${efficiencyRules}
 <requirements>
 - index.html MUST be the main page (REQUIRED)
 - Use Tailwind CSS via CDN: <script src="https://cdn.tailwindcss.com"></script>
+- Images: https://picsum.photos/WIDTH/HEIGHT (NO base64 data URLs)
 - Mobile-responsive design
 - Clean, semantic HTML5
-</requirements>`;
+</requirements>
+${technicalNotes ? `<technical_notes>${technicalNotes}</technical_notes>` : ''}`;
   } else {
     prompt += `You are an expert Frontend Developer agent building STATIC WEBSITES.
 
@@ -1925,8 +1987,10 @@ ${efficiencyRules}
 ### Requirements
 - index.html MUST be the main page (REQUIRED)
 - Use Tailwind CSS via CDN: <script src="https://cdn.tailwindcss.com"></script>
+- Images: https://picsum.photos/WIDTH/HEIGHT (NO base64 data URLs)
 - Mobile-responsive design
-- Clean, semantic HTML5`;
+- Clean, semantic HTML5
+${technicalNotes ? `\n### Technical Notes\n${technicalNotes}` : ''}`;
   }
 
   return prompt;

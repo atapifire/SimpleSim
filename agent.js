@@ -12,6 +12,7 @@ import { checkModelToolSupport } from './ai.js';
 import { getApiKey } from './job-queue.js';
 import { getModelProfile, getPromptStyle } from './model-profiles.js';
 import { applyEdits, validateEdits, validateFileSyntax, validateAndRepairFiles } from './file-ops.js';
+import { TECHNICAL_GUIDELINES, getLibraryInstructions } from './protocol-data.js';
 
 // Agent configuration
 const MAX_ITERATIONS = 10;
@@ -403,7 +404,7 @@ function executeTool(name, args) {
 /**
  * Build the agent system prompt with model-specific optimizations
  */
-function buildAgentSystemPrompt(isNewProject, modelProfile) {
+function buildAgentSystemPrompt(isNewProject, modelProfile, userPrompt = '') {
     const mode = isNewProject ? 'CREATE' : 'MODIFY';
     const style = modelProfile?.promptStyle || 'markdown';
 
@@ -414,7 +415,8 @@ CRITICAL RULES - YOU MUST FOLLOW THESE:
 2. index.html MUST exist - it is the main entry point. NEVER delete it.
 3. You may create any file types needed (.html, .css, .js, .json, .txt, .md, etc.)
 4. The main content should be in index.html - users see this first.
-5. No server-side code (no PHP, Python, etc.) - static files only.`;
+5. No server-side code (no PHP, Python, etc.) - static files only.
+6. Don't ask questions - the user cannot see your questions.`;
 
     // Base tool documentation
     const toolDocs = `
@@ -449,9 +451,12 @@ REQUIREMENTS:
 - Use Tailwind CSS: <script src="https://cdn.tailwindcss.com"></script>
 - Write clean, semantic HTML5
 - Use vanilla JavaScript (no frameworks)
-- Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs
+- Images: https://picsum.photos/WIDTH/HEIGHT or placeholder divs (NO base64 data URLs)
 - Make it mobile-responsive
 - Keep individual files under 200 lines when practical`;
+
+    // Get context-aware technical guidelines
+    const technicalNotes = buildAgentTechnicalNotes(userPrompt);
 
     // Model-specific formatting
     if (style === 'xml-tags') {
@@ -474,7 +479,7 @@ REQUIREMENTS:
 </workflow>
 ${efficiencyRules}
 ${requirements}
-
+${technicalNotes ? `\n<technical_notes>${technicalNotes}</technical_notes>` : ''}
 <important>
 - Make changes incrementally
 - index.html MUST remain as the main entry point
@@ -501,12 +506,53 @@ ${toolDocs}
 5. Call finish() with a summary when done
 ${efficiencyRules}
 ${requirements}
-
+${technicalNotes ? `\n### Technical Notes\n${technicalNotes}` : ''}
 ### Important
 - Make changes incrementally
 - index.html MUST remain as the main entry point
 - Preserve existing functionality unless asked to change
 - Call finish() ONLY when ALL changes are complete`;
+}
+
+/**
+ * Build context-aware technical notes for agent mode
+ */
+function buildAgentTechnicalNotes(prompt) {
+    const notes = [];
+    const promptLower = prompt.toLowerCase();
+
+    // 3D/Three.js projects
+    if (promptLower.includes('three') || promptLower.includes('3d') || promptLower.includes('webgl')) {
+        notes.push('For Three.js/3D:');
+        notes.push('- Use WASD for desktop movement');
+        notes.push('- Use nipple.js (https://esm.sh/nipplejs) for mobile controls');
+        notes.push('- Clamp vertical camera rotation between -PI/2 and PI/2');
+        notes.push('- Prioritize smooth frame rates over visual complexity');
+    }
+
+    // Game projects
+    if (promptLower.includes('game') || promptLower.includes('simulation')) {
+        notes.push('For games/simulations:');
+        notes.push('- Focus on functionality and responsive controls');
+        notes.push('- Use requestAnimationFrame for render loops');
+        notes.push('- Test both desktop and mobile input');
+    }
+
+    // Audio/Sound
+    if (promptLower.includes('sound') || promptLower.includes('audio') || promptLower.includes('music')) {
+        notes.push('For audio:');
+        notes.push('- Use WebAudio API directly (AudioContext, GainNode)');
+        notes.push('- Do NOT use howler.js or other audio libraries');
+    }
+
+    // External libraries
+    if (promptLower.includes('library') || promptLower.includes('import') || promptLower.includes('package')) {
+        notes.push('For external libraries:');
+        notes.push('- Use esm.sh CDN: import { x } from "https://esm.sh/package"');
+        notes.push('- Add import maps in the HTML head section');
+    }
+
+    return notes.length > 0 ? notes.join('\n') : '';
 }
 
 /**
@@ -566,7 +612,7 @@ export async function runAgent(prompt, currentFiles) {
 
     // Build initial messages with model-specific prompts
     const messages = [
-        { role: "system", content: buildAgentSystemPrompt(isNewProject, modelProfile) }
+        { role: "system", content: buildAgentSystemPrompt(isNewProject, modelProfile, prompt) }
     ];
 
     // For new projects, tell the agent about the starter template
