@@ -502,10 +502,30 @@ function setupJobEventListeners() {
         hideJobProgress();
     });
 
-    events.addEventListener('session-unlocked', () => {
+    events.addEventListener('session-unlocked', async () => {
         const warning = document.getElementById('job-session-warning');
         if (warning) warning.classList.add('hidden');
         devLog('Session unlocked');
+
+        // Refresh models now that we have an API key
+        try {
+            devLog('Refreshing models after session unlock...');
+            const [fetchedModels, credits] = await Promise.all([
+                fetchModelsWithCredits(),
+                checkCredits()
+            ]);
+
+            // Update the model dropdown if it's cached
+            if (fetchedModels && fetchedModels.length > 0) {
+                devLog('Models refreshed:', fetchedModels.length);
+                // Trigger a UI update for the model list
+                events.dispatchEvent(new CustomEvent('models-updated', {
+                    detail: { models: fetchedModels, credits }
+                }));
+            }
+        } catch (err) {
+            devError('Failed to refresh models after unlock:', err);
+        }
 
         // Retry pending prompt if there was one
         if (state.pendingPrompt) {
@@ -1235,6 +1255,34 @@ function setupModelSelector() {
     window.addEventListener('security-locked', () => {
         isOpen = false;
         dropdown.classList.add('hidden');
+    });
+
+    // Listen for models-updated event (fired after session unlock)
+    events.addEventListener('models-updated', (e) => {
+        const { models: newModels, credits } = e.detail;
+        models = newModels;
+        devLog('Models updated via event:', models.length);
+
+        // Update credits badge
+        const badge = document.getElementById('credits-badge');
+        if (badge && credits) {
+            if (credits.isFreeTier) {
+                badge.textContent = 'Free Tier';
+                badge.className = 'text-[10px] px-2 py-0.5 rounded bg-yellow-900/30 text-yellow-400 border border-yellow-900/30';
+            } else if (credits.isUnlimited) {
+                badge.textContent = 'Unlimited';
+                badge.className = 'text-[10px] px-2 py-0.5 rounded bg-purple-900/30 text-purple-400 border border-purple-900/30';
+            } else {
+                const remaining = (credits.remaining / 100).toFixed(2);
+                badge.textContent = `$${remaining} credits`;
+                badge.className = 'text-[10px] px-2 py-0.5 rounded bg-green-900/30 text-green-400 border border-green-900/30';
+            }
+        }
+
+        // Re-render if dropdown is open
+        if (isOpen) {
+            renderModelList(models);
+        }
     });
 }
 

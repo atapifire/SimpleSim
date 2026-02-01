@@ -994,6 +994,15 @@ async function getApiKeyFromSession(
 
     const apiKey = new TextDecoder().decode(decrypted);
     console.log(`[getApiKeyFromSession] Successfully decrypted key (length: ${apiKey.length})`);
+
+    // Validate the key format
+    if (apiKey.startsWith('sk-or-')) {
+      console.log('[getApiKeyFromSession] Key format looks valid (sk-or-...)');
+    } else {
+      console.error('[getApiKeyFromSession] WARNING: Key does not start with sk-or-, may be corrupted');
+      console.error('[getApiKeyFromSession] Key preview:', apiKey.substring(0, 10) + '...');
+    }
+
     return apiKey;
   } catch (error) {
     console.error('[getApiKeyFromSession] Failed to decrypt session key:', error);
@@ -1305,6 +1314,15 @@ async function runAgentGeneration(
           errorDetails = { ...errorDetails, parsed_error: errorJson.error };
         } catch {}
         await logger.error('OpenRouter API error', errorDetails);
+
+        // Add context about what might have gone wrong
+        if (response.status === 401 || errorMsg.includes('User not found')) {
+          console.error('[process-job] API key authentication failed. This usually means:');
+          console.error('[process-job] 1. The API key is invalid or expired');
+          console.error('[process-job] 2. The session key was corrupted during storage/retrieval');
+          console.error('[process-job] 3. The key reconstruction from shares failed');
+          throw new Error(`OpenRouter auth failed: ${errorMsg}. Please re-setup your API key.`);
+        }
         throw new Error(errorMsg);
       }
 
