@@ -253,6 +253,29 @@ Deno.serve(async (req) => {
       return errorResponse('Key reconstruction failed - invalid format');
     }
 
+    // Validate the API key actually works by making a test call to OpenRouter
+    console.log(`[unlock-session] Validating API key with OpenRouter...`);
+    try {
+      const testResponse = await fetch('https://openrouter.ai/api/v1/auth/key', {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+        },
+      });
+
+      if (!testResponse.ok) {
+        const errorText = await testResponse.text();
+        console.error(`[unlock-session] API key validation failed: ${testResponse.status} - ${errorText}`);
+        return errorResponse(`API key validation failed: Your OpenRouter key appears to be invalid. Please check your key and try again. (${testResponse.status})`);
+      }
+
+      const keyInfo = await testResponse.json();
+      console.log(`[unlock-session] API key validated successfully. Key label: ${keyInfo.data?.label || 'unknown'}`);
+    } catch (validationError) {
+      console.error(`[unlock-session] API key validation error:`, validationError);
+      return errorResponse('Failed to validate API key with OpenRouter. Please try again.');
+    }
+
     // Generate session token
     const sessionToken = toHex(generateKey());
     const sessionTokenHash = toHex(await sha256(sessionToken));
@@ -283,6 +306,14 @@ Deno.serve(async (req) => {
       .delete()
       .eq('user_id', auth.userId)
       .eq('device_id', deviceId);
+
+    // Also delete any legacy sessions (without device_id) to prevent stale sessions
+    // from being picked up by process-job
+    await serviceClient
+      .from('active_sessions')
+      .delete()
+      .eq('user_id', auth.userId)
+      .is('device_id', null);
 
     console.log(`[unlock-session] Creating session for device: ${deviceId}`);
 

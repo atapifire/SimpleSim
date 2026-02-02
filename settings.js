@@ -324,7 +324,8 @@ function setupListeners() {
     d.btnRemoveServerKey?.addEventListener('click', async () => {
         if (confirm("Remove server key? You'll need to set it up again to use background jobs.")) {
             // Use clearServerKey() which handles both device-specific and legacy storage
-            clearServerKey();
+            // AND invalidates server-side session
+            await clearServerKey();
             state.settings.hasServerKey = false;
             state.settings.useBackgroundJobs = false;
             state.sessionUnlocked = false;

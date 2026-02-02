@@ -1510,15 +1510,37 @@ export function hasServerKey() {
 }
 
 /**
- * Clear local key share for this device
+ * Clear local key share for this device and invalidate server-side session
  */
-export function clearServerKey() {
+export async function clearServerKey() {
     const storageKey = getShareBStorageKey();
     localStorage.removeItem(storageKey);
     localStorage.removeItem('simplesim_share_b'); // Also clear legacy key
     state.sessionUnlocked = false;
     state.serverApiKey = null;
     state.sessionExpiresAt = null;
+
+    // Also invalidate server-side session to prevent stale sessions being used
+    try {
+        if (state.user?.id) {
+            const deviceId = getDeviceId();
+            devLog('Invalidating server session for device:', deviceId);
+            const supabase = getSupabaseClient();
+            if (supabase) {
+                // Delete session for this device
+                await supabase
+                    .from('active_sessions')
+                    .delete()
+                    .eq('user_id', state.user.id)
+                    .eq('device_id', deviceId);
+                devLog('Server session invalidated');
+            }
+        }
+    } catch (e) {
+        devError('Failed to invalidate server session:', e);
+        // Continue anyway - local clear is the important part
+    }
+
     devLog('Server key cleared for device:', getDeviceId());
 }
 
