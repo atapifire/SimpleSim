@@ -191,9 +191,13 @@ function setupEventListeners() {
 
     // Send Handlers - click works on both desktop and mobile
     btnSend?.addEventListener('click', (e) => {
+        console.log('[SEND] Button clicked, disabled:', btnSend.disabled);
         e.preventDefault();
         if (!btnSend.disabled) {
+            console.log('[SEND] Calling handleSend()');
             handleSend();
+        } else {
+            console.log('[SEND] Button is disabled, not sending');
         }
     });
 
@@ -755,19 +759,27 @@ async function autoQueueCurrentGeneration() {
 }
 
 async function handleSend(isRetry = false) {
+    console.log('[handleSend] Called, isRetry:', isRetry);
     const input = document.getElementById('prompt-input');
     const prompt = isRetry ? state.pendingPrompt : input.value.trim();
+    console.log('[handleSend] Prompt:', prompt ? prompt.substring(0, 50) + '...' : '(empty)');
 
-    if (!prompt) return;
+    if (!prompt) {
+        console.log('[handleSend] No prompt, returning early');
+        return;
+    }
 
     // Auth Check
+    console.log('[handleSend] state.user:', !!state.user);
     if (!state.user) {
+        console.log('[handleSend] No user, showing toast');
         showToast('Please sign in with GitHub first');
         return;
     }
 
     // Check which key system to use
     const useServerKey = hasServerKeyConfigured();
+    console.log('[handleSend] useServerKey:', useServerKey, 'sessionUnlocked:', state.sessionUnlocked);
 
     if (useServerKey) {
         // Server key mode - check session is unlocked
@@ -822,8 +834,10 @@ async function handleSend(isRetry = false) {
     // Background job mode - use if server key is configured and setting is enabled
     // Requires cron scheduler (GitHub Actions workflow is set up for this)
     const useBackgroundMode = useServerKey && state.settings.useBackgroundJobs;
+    console.log('[handleSend] useBackgroundMode:', useBackgroundMode, 'settings.useBackgroundJobs:', state.settings.useBackgroundJobs);
 
     if (useBackgroundMode) {
+        console.log('[handleSend] Using BACKGROUND JOB mode');
         devLog('Using BACKGROUND JOB mode');
 
         try {
