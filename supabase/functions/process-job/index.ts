@@ -124,6 +124,95 @@ class JobLogger {
 
 const logger = new JobLogger();
 
+/**
+ * Update job status message - shown to user in UI
+ */
+async function updateJobStatus(
+  serviceClient: ReturnType<typeof createServiceClient>,
+  jobId: string,
+  statusMessage: string,
+  extraData?: Record<string, unknown>
+) {
+  const updateData: Record<string, unknown> = {
+    status_message: statusMessage,
+    updated_at: new Date().toISOString()
+  };
+  if (extraData) {
+    Object.assign(updateData, extraData);
+  }
+
+  await serviceClient
+    .from('jobs')
+    .update(updateData)
+    .eq('id', jobId);
+
+  console.log(`[process-job] Status: ${statusMessage}`);
+}
+
+/**
+ * Retry configuration for different error types
+ */
+const RETRY_CONFIG = {
+  // Routing errors - model temporarily unavailable (wait longer)
+  routing: { maxRetries: 5, baseDelayMs: 5000, maxDelayMs: 60000 },
+  // Rate limits - wait and retry
+  rateLimit: { maxRetries: 3, baseDelayMs: 10000, maxDelayMs: 60000 },
+  // Transient server errors
+  transient: { maxRetries: 3, baseDelayMs: 1000, maxDelayMs: 10000 },
+};
+
+/**
+ * Calculate exponential backoff delay
+ */
+function getBackoffDelay(attempt: number, config: typeof RETRY_CONFIG.routing): number {
+  const delay = Math.min(config.baseDelayMs * Math.pow(2, attempt - 1), config.maxDelayMs);
+  // Add some jitter (±20%)
+  const jitter = delay * 0.2 * (Math.random() - 0.5);
+  return Math.floor(delay + jitter);
+}
+
+/**
+ * Generate human-readable status message for a tool call
+ */
+function getToolStatusMessage(toolName: string, args: Record<string, unknown>): string {
+  switch (toolName) {
+    case 'read_file':
+      return `Reading ${args.path || 'file'}...`;
+    case 'read_file_section':
+      return `Reading lines ${args.start_line}-${args.end_line} of ${args.path}...`;
+    case 'write_file':
+      return `Writing ${args.path || 'file'}...`;
+    case 'edit_file': {
+      const editCount = Array.isArray(args.edits) ? args.edits.length : 0;
+      return `Editing ${args.path} (${editCount} change${editCount !== 1 ? 's' : ''})...`;
+    }
+    case 'delete_file':
+      return `Deleting ${args.path}...`;
+    case 'list_files':
+      return 'Listing project files...';
+    case 'search_files':
+      return `Searching for "${String(args.query || '').substring(0, 30)}"...`;
+    case 'validate_file':
+      return `Validating ${args.path}...`;
+    case 'preview_site':
+      return 'Rendering preview...';
+    case 'get_preview_errors':
+      return 'Checking for runtime errors...';
+    case 'check_dom':
+      return 'Checking DOM element references...';
+    case 'validate_and_preview':
+      return 'Running comprehensive validation...';
+    case 'get_library_docs':
+      return `Looking up ${args.library || 'library'} documentation...`;
+    case 'search_libraries':
+      return `Searching libraries for "${args.query || ''}"...`;
+    case 'finish':
+      return 'Validating and finishing...';
+    default:
+      return `Running ${toolName}...`;
+  }
+}
+
 interface JobData {
   id: string;
   user_id: string;
@@ -1321,44 +1410,132 @@ async function runAgentGeneration(
         has_tools: true
       });
 
-      // Retry logic for transient errors
+      // Enhanced retry logic with specific handling for different error types
       let response: Response | null = null;
       let lastError = '';
-      const maxRetries = 3;
+      let routingRetryCount = 0;
+      let rateLimitRetryCount = 0;
+      const maxTransientRetries = 3;
 
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(requestBody),
-            signal: AbortSignal.timeout(AGENT_ITERATION_TIMEOUT_MS),
-          });
+      // Outer loop for routing/rate-limit retries (with longer waits)
+      while (routingRetryCount <= RETRY_CONFIG.routing.maxRetries && rateLimitRetryCount <= RETRY_CONFIG.rateLimit.maxRetries) {
 
-          console.log(`[process-job] OpenRouter response status: ${response.status} (attempt ${attempt})`);
+        // Inner loop for transient errors (quick retries)
+        for (let attempt = 1; attempt <= maxTransientRetries; attempt++) {
+          try {
+            await updateJobStatus(serviceClient, jobData.id,
+              `Iteration ${currentIteration + 1}: Calling AI model...`
+            );
 
-          // Retry on transient errors
-          if (response.status === 429 || response.status >= 500) {
-            const errorBody = await response.text();
-            lastError = `HTTP ${response.status}: ${errorBody}`;
-            console.warn(`[process-job] Transient error, retrying in ${attempt}s...`);
-            await new Promise(r => setTimeout(r, attempt * 1000));
-            continue;
-          }
+            response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(requestBody),
+              signal: AbortSignal.timeout(AGENT_ITERATION_TIMEOUT_MS),
+            });
 
-          break; // Success or non-retryable error
-        } catch (fetchError) {
-          lastError = fetchError.message;
-          if (attempt < maxRetries) {
-            console.warn(`[process-job] Fetch error, retrying: ${fetchError.message}`);
-            await new Promise(r => setTimeout(r, attempt * 1000));
+            console.log(`[process-job] OpenRouter response status: ${response.status} (attempt ${attempt})`);
+
+            // Retry on server errors (5xx)
+            if (response.status >= 500) {
+              const errorBody = await response.text();
+              lastError = `HTTP ${response.status}: ${errorBody}`;
+              console.warn(`[process-job] Server error, retrying in ${attempt}s...`);
+              await updateJobStatus(serviceClient, jobData.id,
+                `Server error, retrying... (attempt ${attempt}/${maxTransientRetries})`
+              );
+              await new Promise(r => setTimeout(r, attempt * 1000));
+              continue;
+            }
+
+            break; // Got a response (success or client error)
+          } catch (fetchError) {
+            lastError = fetchError.message;
+            if (attempt < maxTransientRetries) {
+              console.warn(`[process-job] Fetch error, retrying: ${fetchError.message}`);
+              await updateJobStatus(serviceClient, jobData.id,
+                `Connection error, retrying... (attempt ${attempt}/${maxTransientRetries})`
+              );
+              await new Promise(r => setTimeout(r, attempt * 1000));
+            }
           }
         }
+
+        if (!response) {
+          await logger.error('All transient retries failed', { last_error: lastError });
+          throw new Error(`API connection failed after ${maxTransientRetries} attempts: ${lastError}`);
+        }
+
+        // Check for retryable errors that need longer waits
+        if (!response.ok) {
+          const errorBody = await response.text();
+          let errorMsg = `API error: ${response.status}`;
+          try {
+            const errorJson = JSON.parse(errorBody);
+            errorMsg = errorJson.error?.message || errorJson.message || errorMsg;
+          } catch {}
+
+          // Handle routing errors with retry
+          if (errorMsg.includes('No matching route') || errorMsg.includes('not configured in the Gateway')) {
+            routingRetryCount++;
+            if (routingRetryCount <= RETRY_CONFIG.routing.maxRetries) {
+              const delay = getBackoffDelay(routingRetryCount, RETRY_CONFIG.routing);
+              const delaySec = Math.round(delay / 1000);
+              console.warn(`[process-job] Routing error, retry ${routingRetryCount}/${RETRY_CONFIG.routing.maxRetries} in ${delaySec}s...`);
+              await logger.warn(`Model temporarily unavailable, waiting ${delaySec}s before retry`, {
+                retry: routingRetryCount,
+                max_retries: RETRY_CONFIG.routing.maxRetries,
+                delay_ms: delay
+              });
+              await updateJobStatus(serviceClient, jobData.id,
+                `Model temporarily unavailable, waiting ${delaySec}s... (retry ${routingRetryCount}/${RETRY_CONFIG.routing.maxRetries})`
+              );
+              await new Promise(r => setTimeout(r, delay));
+              response = null; // Reset for next attempt
+              continue;
+            }
+            // Max retries exceeded for routing
+            const isFreeModel = jobData.model.includes(':free');
+            let helpfulMsg = `Model "${jobData.model}" is unavailable after ${routingRetryCount} retries`;
+            if (isFreeModel) {
+              helpfulMsg += '. Free model providers may be overloaded. Try a paid model for more reliable access.';
+            }
+            throw new Error(helpfulMsg);
+          }
+
+          // Handle rate limiting with retry
+          if (response.status === 429) {
+            rateLimitRetryCount++;
+            if (rateLimitRetryCount <= RETRY_CONFIG.rateLimit.maxRetries) {
+              const delay = getBackoffDelay(rateLimitRetryCount, RETRY_CONFIG.rateLimit);
+              const delaySec = Math.round(delay / 1000);
+              console.warn(`[process-job] Rate limited, retry ${rateLimitRetryCount}/${RETRY_CONFIG.rateLimit.maxRetries} in ${delaySec}s...`);
+              await logger.warn(`Rate limited, waiting ${delaySec}s before retry`, {
+                retry: rateLimitRetryCount,
+                max_retries: RETRY_CONFIG.rateLimit.maxRetries,
+                delay_ms: delay
+              });
+              await updateJobStatus(serviceClient, jobData.id,
+                `Rate limited, waiting ${delaySec}s... (retry ${rateLimitRetryCount}/${RETRY_CONFIG.rateLimit.maxRetries})`
+              );
+              await new Promise(r => setTimeout(r, delay));
+              response = null; // Reset for next attempt
+              continue;
+            }
+            throw new Error('Rate limit exceeded after multiple retries. Please wait a few minutes and try again.');
+          }
+
+          // Non-retryable error - break out of retry loop
+          break;
+        }
+
+        // Success - break out of retry loop
+        break;
       }
 
       if (!response) {
-        await logger.error('All API retries failed', { last_error: lastError, retries: maxRetries });
-        throw new Error(`All ${maxRetries} retries failed: ${lastError}`);
+        await logger.error('All API retries exhausted', { last_error: lastError });
+        throw new Error(`All retries failed: ${lastError}`);
       }
 
       if (!response.ok) {
@@ -1368,46 +1545,19 @@ async function runAgentGeneration(
         let providerError = '';
         try {
           const errorJson = JSON.parse(errorBody);
-          // OpenRouter returns errors in multiple formats
-          // Standard: { error: { message: "...", code: "..." } }
-          // Provider pass-through: { error: { message: "...", metadata: { raw: "..." } } }
           errorMsg = errorJson.error?.message || errorJson.message || errorMsg;
           providerError = errorJson.error?.metadata?.raw || '';
           errorDetails = { ...errorDetails, parsed_error: errorJson.error, provider_error: providerError };
         } catch {}
         await logger.error('OpenRouter API error', errorDetails);
 
-        // Add context about what might have gone wrong
+        // Auth errors (not retryable)
         if (response.status === 401 || errorMsg.includes('User not found')) {
-          console.error('[process-job] API key authentication failed. This usually means:');
-          console.error('[process-job] 1. The API key is invalid or expired');
-          console.error('[process-job] 2. The session key was corrupted during storage/retrieval');
-          console.error('[process-job] 3. The key reconstruction from shares failed');
           throw new Error(`OpenRouter auth failed: ${errorMsg}. Please re-setup your API key.`);
         }
 
-        // Handle routing errors (common with free models when providers are unavailable)
-        if (errorMsg.includes('No matching route') || errorMsg.includes('not configured in the Gateway')) {
-          const isFreeModel = jobData.model.includes(':free');
-          let helpfulMsg = `Model "${jobData.model}" is temporarily unavailable`;
-          if (isFreeModel) {
-            helpfulMsg += '. Free model providers may be overloaded. Try again in a few minutes, or switch to a paid model for more reliable access.';
-          } else {
-            helpfulMsg += '. The model may be offline or not available through any provider. Try a different model.';
-          }
-          throw new Error(helpfulMsg);
-        }
-
-        // Handle provider errors with more context
+        // Provider errors with context
         if (response.status === 502 || errorMsg.toLowerCase().includes('provider')) {
-          const modelFamily = getModelFamily(jobData.model);
-          console.error(`[process-job] Provider error for model ${jobData.model} (${modelFamily})`);
-          console.error('[process-job] This usually means:');
-          console.error('[process-job] 1. The model is not available for your account tier');
-          console.error('[process-job] 2. The provider (e.g., Anthropic, OpenAI) rejected the request');
-          console.error('[process-job] 3. The model may be overloaded or temporarily unavailable');
-
-          // Build a helpful error message
           let helpfulMsg = `Provider returned error for model "${jobData.model}"`;
           if (providerError) {
             helpfulMsg += `: ${providerError}`;
@@ -1418,12 +1568,7 @@ async function runAgentGeneration(
           throw new Error(helpfulMsg);
         }
 
-        // Handle rate limiting
-        if (response.status === 429) {
-          throw new Error('Rate limit exceeded. Please wait a moment and try again.');
-        }
-
-        // Generic error with full context
+        // Generic error
         const fullError = providerError ? `${errorMsg} (${providerError})` : errorMsg;
         throw new Error(fullError);
       }
@@ -1482,6 +1627,12 @@ async function runAgentGeneration(
         for (const toolCall of toolCalls) {
           const toolName = toolCall.function.name;
           const toolArgs = JSON.parse(toolCall.function.arguments || '{}');
+
+          // Generate human-readable status message for this tool
+          const toolStatusMsg = getToolStatusMessage(toolName, toolArgs);
+          await updateJobStatus(serviceClient, jobData.id,
+            `Iteration ${currentIteration + 1}: ${toolStatusMsg}`
+          );
 
           await logger.debug(`Executing tool: ${toolName}`, {
             tool: toolName,

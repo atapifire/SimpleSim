@@ -423,16 +423,29 @@ function updateJobProgressUI(job) {
     const statusIndicator = document.getElementById('job-status-indicator');
     const iterationCount = document.getElementById('job-iteration-count');
     const progressBar = document.getElementById('job-progress-bar');
+    const statusDetail = document.getElementById('job-status-detail');
 
+    // Use detailed status message if available, otherwise generic status
     if (statusText) {
-        const statusMap = {
-            'pending': 'Queued...',
-            'processing': job.job_type === 'agent' ? 'Agent working...' : 'Generating...',
-            'completed': 'Complete!',
-            'failed': 'Failed',
-            'cancelled': 'Cancelled'
-        };
-        statusText.textContent = statusMap[job.status] || job.status;
+        if (job.status === 'processing' && job.statusMessage) {
+            // Show the detailed status message from the server
+            statusText.textContent = job.statusMessage;
+        } else {
+            const statusMap = {
+                'pending': 'Queued...',
+                'processing': job.job_type === 'agent' ? 'Agent working...' : 'Generating...',
+                'completed': 'Complete!',
+                'failed': 'Failed',
+                'cancelled': 'Cancelled'
+            };
+            statusText.textContent = statusMap[job.status] || job.status;
+        }
+    }
+
+    // Update detailed status element if it exists
+    if (statusDetail && job.statusMessage) {
+        statusDetail.textContent = job.statusMessage;
+        statusDetail.classList.remove('hidden');
     }
 
     if (statusIndicator) {
@@ -840,6 +853,10 @@ async function handleSend(isRetry = false) {
                 onProgress: (progress) => {
                     job.current_iteration = progress.iteration;
                     job.max_iterations = progress.maxIterations;
+                    job.statusMessage = progress.statusMessage;
+                    if (progress.statusMessage) {
+                        devLog(`[Job ${job.id}] ${progress.statusMessage}`);
+                    }
                     updateJobProgressUI(job);
                 },
                 onLog: (logs, modelInfo) => {

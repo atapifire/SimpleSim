@@ -1272,7 +1272,9 @@ export function subscribeToJob(jobId, callbacks = {}) {
             },
             (payload) => {
                 const job = payload.new;
-                devLog('Job update:', job.status, job.current_iteration);
+                // Show detailed status message if available
+                const statusDetail = job.status_message || `Iteration ${job.current_iteration || 0}`;
+                devLog('Job update:', job.status, statusDetail);
 
                 onStatusChange(job.status);
 
@@ -1285,7 +1287,8 @@ export function subscribeToJob(jobId, callbacks = {}) {
                     onProgress({
                         iteration: job.current_iteration,
                         maxIterations: job.max_iterations,
-                        workingFiles: job.working_files
+                        workingFiles: job.working_files,
+                        statusMessage: job.status_message  // Include detailed status
                     });
                 }
 
@@ -1313,7 +1316,7 @@ export function subscribeToJob(jobId, callbacks = {}) {
                 try {
                     const { data: job } = await supabase
                         .from('jobs')
-                        .select('status, error_message, processing_log, result_files, result_description, result_version_id, current_iteration, max_iterations, job_type, model_info')
+                        .select('status, status_message, error_message, processing_log, result_files, result_description, result_version_id, current_iteration, max_iterations, job_type, model_info')
                         .eq('id', jobId)
                         .single();
 
