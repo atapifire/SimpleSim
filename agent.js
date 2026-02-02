@@ -59,6 +59,15 @@ const STARTER_FILES = [
 let workingFiles = [];
 let iterationCount = 0;
 
+// Validation tracking - ensures agent checks for errors before finishing
+let validationState = {
+    errorCheckPerformed: false,   // True if check_dom or get_preview_errors was called
+    previewRendered: false,       // True if preview_site was called
+    lastDomCheckResult: null,     // Result of last check_dom call
+    lastPreviewErrors: null,      // Result of last get_preview_errors call
+    filesModifiedSinceCheck: false // True if files changed after last error check
+};
+
 /**
  * Available tools for the agent
  * Enhanced with edit_file, read_file_section, and validate_file
@@ -303,8 +312,20 @@ const TOOLS = [
     {
         type: "function",
         function: {
+            name: "validate_and_preview",
+            description: "RECOMMENDED before finish(). Runs comprehensive validation: checks DOM references, validates file syntax, and renders preview to catch runtime errors. Returns all issues in one response. Call this before finish() to ensure your code works.",
+            parameters: {
+                type: "object",
+                properties: {},
+                required: []
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
             name: "finish",
-            description: "Signal that all changes are complete and ready to commit",
+            description: "Signal that all changes are complete and ready to commit. IMPORTANT: Will fail if you haven't called check_dom(), validate_and_preview(), or get_preview_errors() first, or if there are unresolved errors.",
             parameters: {
                 type: "object",
                 properties: {
@@ -322,9 +343,68 @@ const TOOLS = [
 /**
  * Validate the project before allowing finish
  * Ensures we have a complete, working website
+ * CRITICAL: Now enforces error checking before finish
  */
 function validateProjectBeforeFinish() {
     const issues = [];
+    const criticalIssues = [];
+
+    // 0. CRITICAL: Check if error validation was performed
+    // The agent MUST call check_dom or get_preview_errors before finishing
+    if (!validationState.errorCheckPerformed) {
+        devLog('finish: BLOCKED - no error check performed');
+        return {
+            valid: false,
+            issues: ['You must check for errors before calling finish()'],
+            hint: 'Call check_dom() to verify element IDs match between HTML and JS, or call preview_site() followed by get_preview_errors() to check for runtime errors.'
+        };
+    }
+
+    // 0b. Check if files were modified AFTER the last error check
+    if (validationState.filesModifiedSinceCheck) {
+        devLog('finish: BLOCKED - files modified after last error check');
+        return {
+            valid: false,
+            issues: ['Files were modified after the last error check'],
+            hint: 'Call check_dom() or get_preview_errors() again to validate your recent changes before calling finish().'
+        };
+    }
+
+    // 0c. Check if there are UNRESOLVED errors from the last check
+    if (validationState.lastDomCheckResult && !validationState.lastDomCheckResult.valid) {
+        const domIssues = validationState.lastDomCheckResult.issues || [];
+        for (const issue of domIssues) {
+            let msg = `UNRESOLVED DOM mismatch in ${issue.file}: ${issue.ids.join(', ')}`;
+            if (issue.suggestions && Object.keys(issue.suggestions).length > 0) {
+                const firstSuggestion = Object.entries(issue.suggestions)[0];
+                msg += ` (did you mean "${firstSuggestion[1][0]}" instead of "${firstSuggestion[0]}"?)`;
+            }
+            criticalIssues.push(msg);
+        }
+        devLog('finish: BLOCKED - unresolved DOM mismatches:', domIssues.length);
+    }
+
+    // 0d. Check if there are UNRESOLVED preview errors
+    if (validationState.lastPreviewErrors && validationState.lastPreviewErrors.hasErrors) {
+        const errors = validationState.lastPreviewErrors.errors || [];
+        const consoleErrors = validationState.lastPreviewErrors.consoleErrors || [];
+        for (const err of errors) {
+            criticalIssues.push(`UNRESOLVED runtime error: ${err.message} (line ${err.line || '?'})`);
+        }
+        for (const err of consoleErrors) {
+            criticalIssues.push(`UNRESOLVED console error: ${err.message}`);
+        }
+        devLog('finish: BLOCKED - unresolved preview errors:', errors.length + consoleErrors.length);
+    }
+
+    // If there are unresolved errors from checks, block immediately
+    if (criticalIssues.length > 0) {
+        return {
+            valid: false,
+            issues: criticalIssues,
+            hint: 'Fix the errors reported by check_dom() or get_preview_errors() before calling finish(). DOM mismatches and runtime errors will cause the site to fail.'
+        };
+    }
 
     // 1. Check if index.html exists
     const indexFile = workingFiles.find(f => f.path === 'index.html' || f.path === './index.html');
@@ -342,7 +422,8 @@ function validateProjectBeforeFinish() {
     const contentLength = indexContent.length;
     const hasBody = /<body[^>]*>[\s\S]*<\/body>/i.test(indexContent);
     const hasContent = indexContent.includes('<h1') || indexContent.includes('<main') ||
-                       indexContent.includes('<section') || indexContent.includes('<div class');
+                       indexContent.includes('<section') || indexContent.includes('<div class') ||
+                       indexContent.includes('<canvas');
 
     if (contentLength < 500 || !hasBody || !hasContent) {
         issues.push('index.html appears to have minimal content - ensure you\'ve added the requested features');
@@ -351,7 +432,7 @@ function validateProjectBeforeFinish() {
     // 3. Validate HTML syntax
     const htmlValidation = validateFileSyntax('index.html', indexContent);
     if (!htmlValidation.valid) {
-        issues.push(`index.html has syntax errors: ${htmlValidation.error}`);
+        criticalIssues.push(`index.html has syntax errors: ${htmlValidation.error}`);
     }
 
     // 4. Check for referenced files that don't exist
@@ -364,7 +445,7 @@ function validateProjectBeforeFinish() {
         if (path.startsWith('http') || path.startsWith('//')) continue;
         const exists = workingFiles.some(f => f.path === path || f.path === `./${path}`);
         if (!exists) {
-            issues.push(`CSS file referenced but not found: ${path}`);
+            criticalIssues.push(`CSS file referenced but not found: ${path}`);
         }
     }
 
@@ -374,7 +455,7 @@ function validateProjectBeforeFinish() {
         if (path.startsWith('http') || path.startsWith('//')) continue;
         const exists = workingFiles.some(f => f.path === path || f.path === `./${path}`);
         if (!exists) {
-            issues.push(`JS file referenced but not found: ${path}`);
+            criticalIssues.push(`JS file referenced but not found: ${path}`);
         }
     }
 
@@ -384,11 +465,11 @@ function validateProjectBeforeFinish() {
 
         const validation = validateFileSyntax(file.path, file.content);
         if (!validation.valid) {
-            issues.push(`${file.path} has syntax errors: ${validation.error}`);
+            criticalIssues.push(`${file.path} has syntax errors: ${validation.error}`);
         }
     }
 
-    // 6. Check for DOM element mismatches (common cause of null reference errors)
+    // 6. Run a fresh DOM check as final safety (in case validation state got out of sync)
     const domAnalysis = analyzeDomReferences(workingFiles);
     if (!domAnalysis.valid) {
         for (const issue of domAnalysis.issues) {
@@ -397,22 +478,17 @@ function validateProjectBeforeFinish() {
                 const firstSuggestion = Object.entries(issue.suggestions)[0];
                 msg += ` (did you mean "${firstSuggestion[1][0]}" instead of "${firstSuggestion[0]}"?)`;
             }
-            issues.push(msg);
+            criticalIssues.push(msg);
         }
     }
 
-    // Allow warnings but require no critical issues
-    const criticalIssues = issues.filter(i =>
-        i.includes('missing') ||
-        i.includes('syntax errors') ||
-        i.includes('not found')
-    );
-
+    // Block on critical issues
     if (criticalIssues.length > 0) {
+        devLog('finish: BLOCKED - critical issues:', criticalIssues);
         return {
             valid: false,
             issues: criticalIssues,
-            hint: 'Fix these issues before calling finish'
+            hint: 'Fix these critical issues before calling finish(). DOM mismatches will cause null reference errors at runtime.'
         };
     }
 
@@ -421,7 +497,50 @@ function validateProjectBeforeFinish() {
         devLog('Finish validation warnings:', issues);
     }
 
+    devLog('finish: Validation passed');
     return { valid: true, warnings: issues };
+}
+
+/**
+ * Get a human-readable status message for a tool call
+ * Used to show the user what the agent is currently doing
+ */
+function getToolStatusMessage(toolName, args) {
+    switch (toolName) {
+        case 'read_file':
+            return `Reading ${args.path || 'file'}...`;
+        case 'read_file_section':
+            return `Reading lines ${args.start_line}-${args.end_line} of ${args.path}...`;
+        case 'write_file':
+            return `Writing ${args.path || 'file'}...`;
+        case 'edit_file':
+            const editCount = args.edits?.length || 0;
+            return `Editing ${args.path} (${editCount} change${editCount !== 1 ? 's' : ''})...`;
+        case 'delete_file':
+            return `Deleting ${args.path}...`;
+        case 'list_files':
+            return 'Listing project files...';
+        case 'search_files':
+            return `Searching for "${args.query?.substring(0, 30) || ''}"...`;
+        case 'validate_file':
+            return `Validating ${args.path}...`;
+        case 'preview_site':
+            return 'Rendering preview...';
+        case 'get_preview_errors':
+            return 'Checking for runtime errors...';
+        case 'check_dom':
+            return 'Checking DOM element references...';
+        case 'get_library_docs':
+            return `Looking up ${args.library || 'library'} documentation...`;
+        case 'search_libraries':
+            return `Searching libraries for "${args.query || ''}"...`;
+        case 'validate_and_preview':
+            return 'Running comprehensive validation...';
+        case 'finish':
+            return 'Validating and finishing...';
+        default:
+            return `Running ${toolName}...`;
+    }
 }
 
 /**
@@ -479,6 +598,8 @@ function executeTool(name, args) {
                 workingFiles.push({ path: args.path, content: args.content });
                 devLog(`Created file: ${args.path}`);
             }
+            // Track that files changed - requires new error check before finish
+            validationState.filesModifiedSinceCheck = true;
             return { success: true, message: `File written: ${args.path}` };
         }
 
@@ -517,6 +638,9 @@ function executeTool(name, args) {
             // Update file content
             file.content = result.content;
             devLog(`Edited file: ${args.path} (${args.edits.length} changes)`);
+
+            // Track that files changed - requires new error check before finish
+            validationState.filesModifiedSinceCheck = true;
 
             return {
                 success: true,
@@ -598,6 +722,10 @@ function executeTool(name, args) {
                 // Render the project
                 renderProject(workingFiles);
 
+                // Track that preview was rendered
+                validationState.previewRendered = true;
+                devLog('preview_site: Preview rendered, awaiting error check');
+
                 // Wait a moment for JavaScript to execute and errors to be captured
                 // The actual waiting happens in the agent loop via async delay
                 return {
@@ -615,6 +743,12 @@ function executeTool(name, args) {
 
         case 'get_preview_errors': {
             const errors = getPreviewErrors();
+
+            // Track that error check was performed
+            validationState.errorCheckPerformed = true;
+            validationState.lastPreviewErrors = errors;
+            validationState.filesModifiedSinceCheck = false;
+            devLog('get_preview_errors: hasErrors=', errors.hasErrors);
 
             if (!errors.hasErrors && errors.consoleWarns.length === 0) {
                 return {
@@ -674,7 +808,13 @@ function executeTool(name, args) {
             // Static analysis to detect DOM element mismatches
             const analysis = analyzeDomReferences(workingFiles);
 
+            // Track that error check was performed
+            validationState.errorCheckPerformed = true;
+            validationState.lastDomCheckResult = analysis;
+            validationState.filesModifiedSinceCheck = false;
+
             if (analysis.valid) {
+                devLog('check_dom: All DOM references valid');
                 return {
                     success: true,
                     valid: true,
@@ -700,13 +840,15 @@ function executeTool(name, args) {
                 };
             });
 
+            devLog('check_dom: Found DOM mismatches:', formattedIssues.length, 'issues');
+
             return {
                 success: true,
                 valid: false,
                 issues: formattedIssues,
                 htmlIds: analysis.htmlIds,
                 jsIds: analysis.jsIds,
-                hint: 'JavaScript references elements that do not exist in HTML. This will cause "Cannot read properties of null" errors. Fix the element IDs to match exactly.'
+                hint: 'CRITICAL: JavaScript references elements that do not exist in HTML. This will cause "Cannot read properties of null" errors. You MUST fix these before calling finish().'
             };
         }
 
@@ -745,20 +887,130 @@ function executeTool(name, args) {
             };
         }
 
+        case 'validate_and_preview': {
+            // Comprehensive validation combining DOM check, syntax validation, and preview
+            devLog('validate_and_preview: Running comprehensive validation...');
+            const allIssues = [];
+            const warnings = [];
+
+            // 1. DOM reference analysis (static)
+            const domAnalysis = analyzeDomReferences(workingFiles);
+            if (!domAnalysis.valid) {
+                for (const issue of domAnalysis.issues) {
+                    let msg = `DOM mismatch in ${issue.file}: ${issue.ids.join(', ')}`;
+                    if (issue.suggestions && Object.keys(issue.suggestions).length > 0) {
+                        const firstSuggestion = Object.entries(issue.suggestions)[0];
+                        msg += ` (did you mean "${firstSuggestion[1][0]}" instead of "${firstSuggestion[0]}"?)`;
+                    }
+                    allIssues.push({ type: 'dom', message: msg });
+                }
+            }
+
+            // 2. Syntax validation for all files
+            for (const file of workingFiles) {
+                const validation = validateFileSyntax(file.path, file.content);
+                if (!validation.valid) {
+                    allIssues.push({ type: 'syntax', file: file.path, message: validation.error });
+                }
+                if (validation.warnings) {
+                    warnings.push(...validation.warnings.map(w => ({ file: file.path, message: w })));
+                }
+            }
+
+            // 3. Check for missing referenced files
+            const indexFile = workingFiles.find(f => f.path === 'index.html');
+            if (indexFile) {
+                const cssLinks = indexFile.content.match(/href=["']([^"']+\.css)["']/gi) || [];
+                const jsScripts = indexFile.content.match(/src=["']([^"']+\.js)["']/gi) || [];
+
+                for (const link of cssLinks) {
+                    const path = link.match(/["']([^"']+)["']/)[1];
+                    if (path.startsWith('http') || path.startsWith('//')) continue;
+                    const exists = workingFiles.some(f => f.path === path || f.path === `./${path}`);
+                    if (!exists) {
+                        allIssues.push({ type: 'missing', message: `CSS file referenced but not found: ${path}` });
+                    }
+                }
+
+                for (const script of jsScripts) {
+                    const path = script.match(/["']([^"']+)["']/)[1];
+                    if (path.startsWith('http') || path.startsWith('//')) continue;
+                    const exists = workingFiles.some(f => f.path === path || f.path === `./${path}`);
+                    if (!exists) {
+                        allIssues.push({ type: 'missing', message: `JS file referenced but not found: ${path}` });
+                    }
+                }
+            } else {
+                allIssues.push({ type: 'missing', message: 'index.html is missing' });
+            }
+
+            // 4. Render preview and capture errors
+            try {
+                clearPreviewErrors();
+                renderProject(workingFiles);
+                validationState.previewRendered = true;
+
+                // Wait a bit for JS to execute (in browser context)
+                // Note: In actual execution, errors are captured asynchronously
+                // The agent should call get_preview_errors() after for runtime errors
+            } catch (err) {
+                allIssues.push({ type: 'render', message: `Preview render failed: ${err.message}` });
+            }
+
+            // Track validation state
+            validationState.errorCheckPerformed = true;
+            validationState.lastDomCheckResult = domAnalysis;
+            validationState.filesModifiedSinceCheck = false;
+
+            devLog('validate_and_preview: Found', allIssues.length, 'issues,', warnings.length, 'warnings');
+
+            if (allIssues.length === 0) {
+                return {
+                    success: true,
+                    valid: true,
+                    message: 'All validations passed! Preview rendered. You can now call finish().',
+                    warnings: warnings.length > 0 ? warnings : undefined,
+                    hint: 'Call get_preview_errors() if you want to check for runtime JavaScript errors, or proceed to finish().'
+                };
+            }
+
+            return {
+                success: true,
+                valid: false,
+                issues: allIssues,
+                warnings: warnings.length > 0 ? warnings : undefined,
+                hint: 'Fix the issues above before calling finish(). DOM mismatches will cause null reference errors. After fixing, call validate_and_preview() again to verify.'
+            };
+        }
+
         case 'finish': {
+            devLog('finish: Agent attempting to finish...');
+            devLog('finish: Validation state:', {
+                errorCheckPerformed: validationState.errorCheckPerformed,
+                previewRendered: validationState.previewRendered,
+                filesModifiedSinceCheck: validationState.filesModifiedSinceCheck,
+                hasUnresolvedDomIssues: validationState.lastDomCheckResult && !validationState.lastDomCheckResult.valid,
+                hasUnresolvedPreviewErrors: validationState.lastPreviewErrors && validationState.lastPreviewErrors.hasErrors
+            });
+
             // Pre-finish validation: ensure we have a complete, valid project
             const validation = validateProjectBeforeFinish();
 
             if (!validation.valid) {
-                devLog('Finish validation failed:', validation.issues);
+                devLog('finish: BLOCKED -', validation.issues.length, 'issues');
                 return {
                     success: false,
-                    error: 'Cannot finish yet - project incomplete',
+                    error: 'Cannot finish yet - validation failed',
                     issues: validation.issues,
-                    hint: validation.hint
+                    hint: validation.hint,
+                    validationState: {
+                        errorCheckPerformed: validationState.errorCheckPerformed,
+                        filesModifiedSinceCheck: validationState.filesModifiedSinceCheck
+                    }
                 };
             }
 
+            devLog('finish: SUCCESS - project validated');
             return { success: true, finished: true, summary: args.summary };
         }
 
@@ -788,9 +1040,12 @@ WORKFLOW FOR NEW PROJECT:
 3. Build the complete site - don't stop after just one file
 4. Use write_file for new files, edit_file for modifications
 5. Validate each file after creating/editing (validate_file)
-6. CRITICAL: Call check_dom() to detect element ID mismatches between HTML and JS
-7. If check_dom reports issues, FIX THEM - these cause null reference errors!
-8. Ensure the project is COMPLETE before calling finish()`
+6. **MANDATORY ERROR CHECK**: Before calling finish(), you MUST:
+   - Call check_dom() to detect element ID mismatches between HTML and JS
+   - OR call preview_site() then get_preview_errors() for runtime errors
+7. If ANY errors are reported, FIX THEM and check again
+8. finish() will REJECT if errors exist or if you haven't checked for errors
+9. Only call finish() when check_dom() shows valid: true`
         : `
 WORKFLOW FOR MODIFICATIONS:
 1. Use list_files() to see current project structure
@@ -798,27 +1053,45 @@ WORKFLOW FOR MODIFICATIONS:
 3. Plan your changes - what files need modification?
 4. Use edit_file for small changes, write_file for major rewrites
 5. Validate changes with validate_file
-6. CRITICAL: Call check_dom() to verify element IDs match between HTML and JS
-7. If check_dom reports mismatches, fix them (e.g., "game" vs "game-container")
-8. Call finish() only when ALL requested changes are complete and error-free`;
+6. **MANDATORY ERROR CHECK**: Before calling finish(), you MUST:
+   - Call check_dom() to verify element IDs match between HTML and JS
+   - This catches errors like "game" vs "game-container" mismatches
+7. If check_dom shows issues, FIX THEM and run check_dom() again
+8. finish() will REJECT if errors exist or if you haven't checked for errors
+9. Call finish() only when check_dom() shows valid: true`;
 
     // Add context-aware technical notes
     const technicalNotes = buildAgentTechnicalNotes(userPrompt);
 
     // Completion requirements - CRITICAL for preventing partial output
     const completionRequirements = `
-COMPLETION REQUIREMENTS (CRITICAL):
-- finish() will FAIL if index.html is missing or empty
-- finish() will FAIL if referenced CSS/JS files don't exist
-- finish() will FAIL if check_dom() finds element ID mismatches
-- You must create a COMPLETE, working website
-- For any request beyond basic text, create separate styles.css and script.js
-- ALWAYS call check_dom() before finish() - this catches the #1 cause of errors!
-- If check_dom() shows mismatches, FIX THEM:
-  * "gameContainer" in JS but "game-container" in HTML -> use same ID
-  * "submitBtn" vs "submit-btn" -> make them match exactly
-  * Element IDs are CASE-SENSITIVE
-- Do NOT call finish() until check_dom() returns valid: true`;
+COMPLETION REQUIREMENTS (CRITICAL - READ CAREFULLY):
+
+**finish() WILL BE REJECTED if:**
+1. You haven't called check_dom() or get_preview_errors() first
+2. Files were modified after your last error check
+3. Any DOM mismatches exist (JS references elements not in HTML)
+4. Any runtime errors exist from get_preview_errors()
+5. index.html is missing or references non-existent files
+
+**REQUIRED WORKFLOW before finish():**
+1. After writing all files, call check_dom()
+2. If check_dom() shows valid: false, fix ALL issues
+3. Call check_dom() AGAIN to verify fixes
+4. Only call finish() when check_dom() shows valid: true
+
+**Common errors that will BLOCK finish():**
+- "gameContainer" in JS but "game-container" in HTML -> IDs must match EXACTLY
+- "canvas" vs "game-canvas" -> be consistent
+- Element IDs are CASE-SENSITIVE: "myDiv" ≠ "mydiv"
+- getElementById('score') when HTML has id="scoreDisplay"
+
+**For libraries (Three.js, Chart.js, etc.):**
+- Use get_library_docs() for correct import syntax
+- ES modules require type="module" on script tags
+- Use import maps for bare imports like 'three'
+
+Do NOT call finish() until you have confirmed no errors exist!`;
 
     // Build the final prompt based on style
     if (style === 'xml-tags') {
@@ -921,6 +1194,15 @@ export async function runAgent(prompt, currentFiles) {
     workingFiles = isNewProject ? STARTER_FILES.map(f => ({ ...f })) : JSON.parse(JSON.stringify(currentFiles));
     iterationCount = 0;
 
+    // Reset validation tracking for this agent run
+    validationState = {
+        errorCheckPerformed: false,
+        previewRendered: false,
+        lastDomCheckResult: null,
+        lastPreviewErrors: null,
+        filesModifiedSinceCheck: true  // Start true since we have initial files
+    };
+
     // Get key from either server session or client-side storage
     const key = getApiKey() || security.getKey();
     if (!key) throw new Error("OpenRouter Key Locked or Missing");
@@ -985,17 +1267,26 @@ export async function runAgent(prompt, currentFiles) {
     // Agent loop
     while (!finished && iterationCount < MAX_ITERATIONS) {
         iterationCount++;
-        thinking.setStatus('thinking', `Agent iteration ${iterationCount}/${MAX_ITERATIONS}...`);
-        thinking.log('iteration', `Starting iteration ${iterationCount}`);
-        devLog(`--- Agent iteration ${iterationCount} ---`);
+        const fileCount = workingFiles.length;
+        const iterationStatus = `Iteration ${iterationCount}/${MAX_ITERATIONS} (${fileCount} files)`;
+        thinking.setStatus('thinking', iterationStatus);
+        thinking.log('iteration', `Starting iteration ${iterationCount} - ${fileCount} files in project`);
+        devLog(`\n${'='.repeat(50)}`);
+        devLog(`AGENT ITERATION ${iterationCount}/${MAX_ITERATIONS}`);
+        devLog(`Files: ${workingFiles.map(f => f.path).join(', ') || 'none'}`);
+        devLog(`Validation state: errorCheck=${validationState.errorCheckPerformed}, modifiedSinceCheck=${validationState.filesModifiedSinceCheck}`);
+        devLog(`${'='.repeat(50)}`);
 
         try {
             const response = await callOpenRouterWithTools(messages, key);
 
             // Check for tool calls
             const toolCalls = response.tool_calls;
+            devLog(`API response: ${toolCalls?.length || 0} tool calls, content: ${response.content ? 'yes' : 'no'}`);
 
             if (toolCalls && toolCalls.length > 0) {
+                thinking.log('info', `Agent calling ${toolCalls.length} tool${toolCalls.length > 1 ? 's' : ''}: ${toolCalls.map(t => t.function.name).join(', ')}`);
+
                 // Add assistant message with tool calls
                 messages.push({
                     role: "assistant",
@@ -1014,9 +1305,21 @@ export async function runAgent(prompt, currentFiles) {
                         devError('Failed to parse tool arguments:', toolCall.function.arguments);
                     }
 
-                    thinking.log('tool', `${toolName}(${JSON.stringify(toolArgs).substring(0, 50)}...)`);
+                    // Show human-readable status for each tool
+                    const toolStatus = getToolStatusMessage(toolName, toolArgs);
+                    thinking.setStatus('thinking', toolStatus);
+                    thinking.log('tool', `${toolName}(${JSON.stringify(toolArgs).substring(0, 80)}...)`);
+                    devLog(`Agent tool: ${toolName}`, toolArgs);
 
                     const result = executeTool(toolName, toolArgs);
+
+                    // Log tool results for verbose output
+                    if (result.success === false) {
+                        devLog(`Tool ${toolName} FAILED:`, result.error || result.issues);
+                        thinking.log('warning', `${toolName} failed: ${result.error || 'validation issues'}`);
+                    } else {
+                        devLog(`Tool ${toolName} result:`, result);
+                    }
 
                     // Add tool result to messages
                     messages.push({
@@ -1029,7 +1332,13 @@ export async function runAgent(prompt, currentFiles) {
                     if (result.finished) {
                         finished = true;
                         finalSummary = result.summary;
-                        devLog('Agent finished:', finalSummary);
+                        devLog('Agent finished successfully!');
+                        devLog('Summary:', finalSummary);
+                        thinking.log('complete', 'Agent finished successfully');
+                    } else if (toolName === 'finish' && !result.success) {
+                        // Log when finish was blocked
+                        devLog('finish() BLOCKED:', result.issues);
+                        thinking.log('warning', `Finish blocked: ${result.issues?.[0] || 'validation failed'}`);
                     }
                 }
             } else if (response.content) {

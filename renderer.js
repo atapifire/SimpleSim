@@ -1,6 +1,29 @@
 import { devLog, devError } from './thinking.js';
 
 /**
+ * Check if JavaScript content uses ES module syntax
+ * @param {string} jsContent - JavaScript code to analyze
+ * @returns {boolean} True if code uses import/export statements
+ */
+function isESModule(jsContent) {
+    if (!jsContent) return false;
+
+    // Patterns that indicate ES module syntax
+    const modulePatterns = [
+        /^\s*import\s+/m,                    // import X from
+        /^\s*import\s*\{/m,                  // import { X } from
+        /^\s*import\s*\*/m,                  // import * as X from
+        /^\s*import\s+['"][^'"]+['"]/m,      // import 'module' (side-effect)
+        /^\s*export\s+/m,                    // export statements
+        /^\s*export\s*\{/m,                  // export { X }
+        /^\s*export\s+default/m,             // export default
+        /\bfrom\s+['"][^'"]+['"]/,           // from 'module'
+    ];
+
+    return modulePatterns.some(pattern => pattern.test(jsContent));
+}
+
+/**
  * Preview Error Store
  * Captures JavaScript errors and console messages from the preview iframe
  * for feeding back to the Agent during iteration
@@ -169,13 +192,21 @@ export function renderProject(files) {
 
     // Remove external script references that we'll inline (prevents NS_BINDING_ABORTED errors)
     // Match <script src="script.js"></script> or similar local file references
+    // IMPORTANT: Preserve type="module" for ES module scripts
     combinedHTML = combinedHTML.replace(
-        /<script\s+[^>]*src\s*=\s*["'](?!https?:\/\/|\/\/)([^"']+\.js)["'][^>]*>\s*<\/script>/gi,
-        (match, src) => {
+        /<script\s+([^>]*)src\s*=\s*["'](?!https?:\/\/|\/\/)([^"']+\.js)["']([^>]*)>\s*<\/script>/gi,
+        (match, beforeSrc, src, afterSrc) => {
             const content = jsFiles.get(src) || jsFiles.get(src.replace(/^\.\//, ''));
             if (content) {
-                devLog(`Inlining script: ${src}`);
-                return `<script>/* Inlined: ${src} */\n${content}\n</script>`;
+                // Check if original tag had type="module" OR if content uses ES module syntax
+                const originalAttrs = beforeSrc + afterSrc;
+                const hadModuleType = /type\s*=\s*["']module["']/i.test(originalAttrs);
+                const contentNeedsModule = isESModule(content);
+                const useModule = hadModuleType || contentNeedsModule;
+
+                const moduleAttr = useModule ? ' type="module"' : '';
+                devLog(`Inlining script: ${src}${useModule ? ' (as module)' : ''}`);
+                return `<script${moduleAttr}>/* Inlined: ${src} */\n${content}\n</script>`;
             }
             // If file not found in project, remove the reference to prevent load errors
             devLog(`Removing missing script reference: ${src}`);
@@ -238,8 +269,14 @@ export function renderProject(files) {
     }
 
     // Inject JS before closing body (only if we have non-inlined JS)
+    // IMPORTANT: Detect if JS uses ES module syntax and add type="module" if needed
     if (allJs) {
-        const jsTag = `<script>\n${allJs}\n</script>`;
+        const needsModule = isESModule(allJs);
+        const moduleAttr = needsModule ? ' type="module"' : '';
+        if (needsModule) {
+            devLog('Injected JS uses ES modules, adding type="module"');
+        }
+        const jsTag = `<script${moduleAttr}>\n${allJs}\n</script>`;
         if (combinedHTML.includes('</body>')) {
             combinedHTML = combinedHTML.replace('</body>', `${jsTag}\n</body>`);
         } else if (combinedHTML.includes('</html>')) {

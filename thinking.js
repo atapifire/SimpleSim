@@ -153,6 +153,8 @@ class ThinkingUI {
             case 'iteration': return 'color: #c4b5fd; font-weight: bold';
             case 'tool': return 'color: #a78bfa; font-weight: bold';
             case 'warning': return 'color: #fbbf24; font-weight: bold';
+            case 'info': return 'color: #38bdf8; font-weight: bold';
+            case 'validation': return 'color: #2dd4bf; font-weight: bold';
             default: return 'color: #9ca3af; font-weight: bold';
         }
     }
