@@ -12,6 +12,7 @@ import { checkModelToolSupport } from './ai.js';
 import { getApiKey } from './job-queue.js';
 import { getModelProfile, getPromptStyle } from './model-profiles.js';
 import { applyEdits, validateEdits, validateFileSyntax, validateAndRepairFiles } from './file-ops.js';
+import { getPreviewErrors, clearPreviewErrors, renderProject } from './renderer.js';
 import { TECHNICAL_GUIDELINES, getLibraryInstructions } from './protocol-data.js';
 import {
     buildAgentSystemPrompt as buildAgentSystemPromptBase,
@@ -212,6 +213,30 @@ const TOOLS = [
                     }
                 },
                 required: ["path"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "preview_site",
+            description: "Render the current project files in the preview and return any JavaScript errors or console messages. Use this to test your changes and catch runtime errors.",
+            parameters: {
+                type: "object",
+                properties: {},
+                required: []
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "get_preview_errors",
+            description: "Get any JavaScript errors or console.error/warn messages from the most recent preview render. Call after preview_site to check for runtime issues.",
+            parameters: {
+                type: "object",
+                properties: {},
+                required: []
             }
         }
     },
@@ -491,6 +516,65 @@ function executeTool(name, args) {
             };
         }
 
+        case 'preview_site': {
+            // Render the current project files in the preview iframe
+            try {
+                // Clear previous errors before render
+                clearPreviewErrors();
+
+                // Render the project
+                renderProject(workingFiles);
+
+                // Wait a moment for JavaScript to execute and errors to be captured
+                // The actual waiting happens in the agent loop via async delay
+                return {
+                    success: true,
+                    message: 'Preview rendered. Call get_preview_errors after a moment to check for runtime errors.',
+                    hint: 'Wait briefly then call get_preview_errors() to see any JavaScript errors.'
+                };
+            } catch (error) {
+                return {
+                    success: false,
+                    error: `Failed to render preview: ${error.message}`
+                };
+            }
+        }
+
+        case 'get_preview_errors': {
+            const errors = getPreviewErrors();
+
+            if (!errors.hasErrors && errors.consoleWarns.length === 0) {
+                return {
+                    success: true,
+                    hasErrors: false,
+                    message: 'No errors detected in the preview.',
+                    lastRenderTime: errors.lastRenderTime
+                };
+            }
+
+            // Format errors for the agent
+            const formattedErrors = errors.errors.map(e => ({
+                type: e.type,
+                message: e.message,
+                line: e.line,
+                column: e.column
+            }));
+
+            const formattedConsoleErrors = errors.consoleErrors.map(e => e.message);
+            const formattedWarns = errors.consoleWarns.map(e => e.message);
+
+            return {
+                success: true,
+                hasErrors: errors.hasErrors,
+                runtimeErrors: formattedErrors,
+                consoleErrors: formattedConsoleErrors,
+                warnings: formattedWarns,
+                hint: errors.hasErrors
+                    ? 'Fix the errors above. Common issues: null element references, undefined variables, missing DOM elements.'
+                    : 'Only warnings detected. Consider reviewing if they indicate potential issues.'
+            };
+        }
+
         case 'finish': {
             // Pre-finish validation: ensure we have a complete, valid project
             const validation = validateProjectBeforeFinish();
@@ -534,7 +618,9 @@ WORKFLOW FOR NEW PROJECT:
 3. Build the complete site - don't stop after just one file
 4. Use write_file for new files, edit_file for modifications
 5. Validate each file after creating/editing (validate_file)
-6. Ensure the project is COMPLETE before calling finish()`
+6. Test with preview_site(), then get_preview_errors() to catch runtime issues
+7. If errors found, fix them before calling finish()
+8. Ensure the project is COMPLETE before calling finish()`
         : `
 WORKFLOW FOR MODIFICATIONS:
 1. Use list_files() to see current project structure
@@ -542,7 +628,9 @@ WORKFLOW FOR MODIFICATIONS:
 3. Plan your changes - what files need modification?
 4. Use edit_file for small changes, write_file for major rewrites
 5. Validate changes with validate_file
-6. Call finish() only when ALL requested changes are complete`;
+6. Test with preview_site(), then get_preview_errors() to catch runtime issues
+7. If errors found, fix them (common: null references, undefined vars, missing elements)
+8. Call finish() only when ALL requested changes are complete and error-free`;
 
     // Add context-aware technical notes
     const technicalNotes = buildAgentTechnicalNotes(userPrompt);
@@ -554,7 +642,13 @@ COMPLETION REQUIREMENTS (CRITICAL):
 - finish() will FAIL if referenced CSS/JS files don't exist
 - You must create a COMPLETE, working website
 - For any request beyond basic text, create separate styles.css and script.js
-- Do NOT call finish() until you've created all necessary files`;
+- ALWAYS call preview_site() then get_preview_errors() before finish()
+- If get_preview_errors() shows errors, FIX THEM before calling finish()
+- Common runtime errors to check:
+  * "Cannot read properties of null" - DOM element not found (check ID/selector)
+  * "is not defined" - missing variable or function declaration
+  * "appendChild" errors - trying to append to null element
+- Do NOT call finish() until the site runs without errors`;
 
     // Build the final prompt based on style
     if (style === 'xml-tags') {

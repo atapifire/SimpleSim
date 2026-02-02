@@ -1,6 +1,103 @@
 import { devLog, devError } from './thinking.js';
 
 /**
+ * Preview Error Store
+ * Captures JavaScript errors and console messages from the preview iframe
+ * for feeding back to the Agent during iteration
+ */
+const previewErrors = {
+    errors: [],       // Runtime errors (window.onerror, unhandledrejection)
+    consoleErrors: [], // console.error() calls
+    consoleWarns: [],  // console.warn() calls
+    lastRenderTime: null,
+};
+
+// Maximum number of errors/messages to store
+const MAX_ERRORS = 20;
+const MAX_CONSOLE = 50;
+
+/**
+ * Clear all stored preview errors
+ * Called before each new render to reset state
+ */
+export function clearPreviewErrors() {
+    previewErrors.errors = [];
+    previewErrors.consoleErrors = [];
+    previewErrors.consoleWarns = [];
+    previewErrors.lastRenderTime = Date.now();
+}
+
+/**
+ * Get all preview errors and console messages
+ * Used by Agent mode to check for runtime issues
+ */
+export function getPreviewErrors() {
+    return {
+        errors: [...previewErrors.errors],
+        consoleErrors: [...previewErrors.consoleErrors],
+        consoleWarns: [...previewErrors.consoleWarns],
+        hasErrors: previewErrors.errors.length > 0 || previewErrors.consoleErrors.length > 0,
+        lastRenderTime: previewErrors.lastRenderTime,
+    };
+}
+
+/**
+ * Add an error from the preview iframe
+ * Called via postMessage from the iframe
+ */
+function addPreviewError(error) {
+    if (previewErrors.errors.length < MAX_ERRORS) {
+        previewErrors.errors.push({
+            ...error,
+            timestamp: Date.now(),
+        });
+    }
+}
+
+/**
+ * Add a console message from the preview iframe
+ */
+function addConsoleMessage(type, args) {
+    const message = args.map(arg => {
+        if (typeof arg === 'object') {
+            try {
+                return JSON.stringify(arg);
+            } catch {
+                return String(arg);
+            }
+        }
+        return String(arg);
+    }).join(' ');
+
+    const entry = { message, timestamp: Date.now() };
+
+    if (type === 'error' && previewErrors.consoleErrors.length < MAX_CONSOLE) {
+        previewErrors.consoleErrors.push(entry);
+    } else if (type === 'warn' && previewErrors.consoleWarns.length < MAX_CONSOLE) {
+        previewErrors.consoleWarns.push(entry);
+    }
+}
+
+// Listen for messages from preview iframe
+if (typeof window !== 'undefined') {
+    window.addEventListener('message', (event) => {
+        // Security: only accept messages from same origin or blob: URLs
+        if (event.origin !== window.location.origin && !event.origin.startsWith('null')) {
+            return;
+        }
+
+        const { type, data } = event.data || {};
+
+        if (type === 'preview-error') {
+            addPreviewError(data);
+            devLog('Preview error captured:', data.message);
+        } else if (type === 'preview-console') {
+            addConsoleMessage(data.level, data.args);
+        }
+    });
+}
+
+/**
  * Render project files in the preview iframe
  * Combines HTML, CSS, and JS into a single document
  *
@@ -15,6 +112,9 @@ export function renderProject(files) {
         devError('Invalid files or preview element');
         return;
     }
+
+    // Clear previous errors before rendering new content
+    clearPreviewErrors();
 
     devLog('Rendering project with files:', files.map(f => f.path));
 
@@ -149,13 +249,69 @@ export function renderProject(files) {
         }
     }
 
-    // Add error handling wrapper for better debugging
+    // Add comprehensive error handling for Agent feedback
     const errorHandler = `
     <script>
-    window.onerror = function(msg, url, line, col, error) {
-        console.error('Preview Error:', msg, 'at line', line);
-        return false;
-    };
+    (function() {
+        // Capture JavaScript errors
+        window.onerror = function(msg, url, line, col, error) {
+            console.error('Preview Error:', msg, 'at line', line);
+            try {
+                window.parent.postMessage({
+                    type: 'preview-error',
+                    data: {
+                        type: 'runtime',
+                        message: String(msg),
+                        line: line,
+                        column: col,
+                        stack: error?.stack || null
+                    }
+                }, '*');
+            } catch(e) {}
+            return false;
+        };
+
+        // Capture unhandled promise rejections
+        window.addEventListener('unhandledrejection', function(event) {
+            const reason = event.reason;
+            const message = reason?.message || String(reason);
+            console.error('Unhandled Promise Rejection:', message);
+            try {
+                window.parent.postMessage({
+                    type: 'preview-error',
+                    data: {
+                        type: 'promise',
+                        message: message,
+                        stack: reason?.stack || null
+                    }
+                }, '*');
+            } catch(e) {}
+        });
+
+        // Intercept console.error and console.warn
+        const originalError = console.error;
+        const originalWarn = console.warn;
+
+        console.error = function(...args) {
+            originalError.apply(console, args);
+            try {
+                window.parent.postMessage({
+                    type: 'preview-console',
+                    data: { level: 'error', args: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)) }
+                }, '*');
+            } catch(e) {}
+        };
+
+        console.warn = function(...args) {
+            originalWarn.apply(console, args);
+            try {
+                window.parent.postMessage({
+                    type: 'preview-console',
+                    data: { level: 'warn', args: args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)) }
+                }, '*');
+            } catch(e) {}
+        };
+    })();
     </script>
     `;
 
