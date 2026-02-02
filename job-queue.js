@@ -1517,6 +1517,8 @@ export function clearServerKey() {
     localStorage.removeItem(storageKey);
     localStorage.removeItem('simplesim_share_b'); // Also clear legacy key
     state.sessionUnlocked = false;
+    state.serverApiKey = null;
+    state.sessionExpiresAt = null;
     devLog('Server key cleared for device:', getDeviceId());
 }
 

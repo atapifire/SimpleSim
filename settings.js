@@ -12,7 +12,8 @@ import {
     unlockSession,
     checkSessionStatus,
     isPasskeySupported,
-    getApiKey
+    getApiKey,
+    clearServerKey
 } from './job-queue.js';
 import { devLog, devError } from './thinking.js';
 
@@ -322,9 +323,12 @@ function setupListeners() {
     d.btnUnlockSession?.addEventListener('click', () => startPinFlow('unlock-session'));
     d.btnRemoveServerKey?.addEventListener('click', async () => {
         if (confirm("Remove server key? You'll need to set it up again to use background jobs.")) {
-            localStorage.removeItem('simplesim_share_b');
+            // Use clearServerKey() which handles both device-specific and legacy storage
+            clearServerKey();
             state.settings.hasServerKey = false;
+            state.settings.useBackgroundJobs = false;
             state.sessionUnlocked = false;
+            state.serverApiKey = null;
             saveSettings();
             updateUI();
             showToast("Server key removed");

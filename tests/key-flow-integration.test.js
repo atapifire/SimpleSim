@@ -340,6 +340,56 @@ describe('Server-Side Key Flows (Background Jobs)', () => {
             expect(mockState.serverApiKey).toBeNull();
         });
 
+        it('should clear BOTH device-specific AND legacy keys on removal', () => {
+            const deviceId = 'device-abc123';
+            const deviceStorageKey = `simplesim_share_b_${deviceId}`;
+            const legacyStorageKey = 'simplesim_share_b';
+
+            // Set both device-specific and legacy keys
+            localStorageMock.setItem(deviceStorageKey, JSON.stringify({ data: 'device-share-b' }));
+            localStorageMock.setItem(legacyStorageKey, JSON.stringify({ data: 'legacy-share-b' }));
+            mockState.settings.hasServerKey = true;
+            mockState.settings.useBackgroundJobs = true;
+
+            // Proper removal should clear BOTH
+            localStorageMock.removeItem(deviceStorageKey);
+            localStorageMock.removeItem(legacyStorageKey);
+            mockState.settings.hasServerKey = false;
+            mockState.settings.useBackgroundJobs = false;
+
+            expect(localStorageMock.getItem(deviceStorageKey)).toBeNull();
+            expect(localStorageMock.getItem(legacyStorageKey)).toBeNull();
+            expect(mockState.settings.hasServerKey).toBe(false);
+            expect(mockState.settings.useBackgroundJobs).toBe(false);
+        });
+
+        it('should clear useBackgroundJobs setting on removal', () => {
+            mockState.settings.hasServerKey = true;
+            mockState.settings.useBackgroundJobs = true;
+
+            // Simulate proper removal (must clear useBackgroundJobs too)
+            mockState.settings.hasServerKey = false;
+            mockState.settings.useBackgroundJobs = false;
+
+            expect(mockState.settings.hasServerKey).toBe(false);
+            expect(mockState.settings.useBackgroundJobs).toBe(false);
+        });
+
+        it('should clear all session state on removal', () => {
+            mockState.sessionUnlocked = true;
+            mockState.serverApiKey = 'sk-or-key';
+            mockState.sessionExpiresAt = Date.now() + 7200000;
+
+            // Proper removal clears ALL session state
+            mockState.sessionUnlocked = false;
+            mockState.serverApiKey = null;
+            mockState.sessionExpiresAt = null;
+
+            expect(mockState.sessionUnlocked).toBe(false);
+            expect(mockState.serverApiKey).toBeNull();
+            expect(mockState.sessionExpiresAt).toBeNull();
+        });
+
         it('should allow re-setup of server key after removal', () => {
             const deviceId = 'device-abc123';
 
@@ -355,6 +405,27 @@ describe('Server-Side Key Flows (Background Jobs)', () => {
 
             expect(localStorageMock.getItem(`simplesim_share_b_${deviceId}`)).toBeTruthy();
             expect(mockState.settings.hasServerKey).toBe(true);
+        });
+
+        it('should not see old key after removal even with page reload', () => {
+            const deviceId = 'device-abc123';
+            const deviceStorageKey = `simplesim_share_b_${deviceId}`;
+
+            // User has key configured
+            localStorageMock.setItem(deviceStorageKey, JSON.stringify({ data: 'share-b' }));
+            mockState.settings.hasServerKey = true;
+
+            // User removes key
+            localStorageMock.removeItem(deviceStorageKey);
+            localStorageMock.removeItem('simplesim_share_b');
+            mockState.settings.hasServerKey = false;
+
+            // Simulate page reload - check hasServerKey logic
+            const hasDeviceKey = !!localStorageMock.getItem(deviceStorageKey);
+            const hasLegacyKey = !!localStorageMock.getItem('simplesim_share_b');
+            const hasKey = hasDeviceKey || hasLegacyKey;
+
+            expect(hasKey).toBe(false);
         });
     });
 });

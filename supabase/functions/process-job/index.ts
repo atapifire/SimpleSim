@@ -1411,7 +1411,7 @@ async function runAgentGeneration(
     });
 
     // Update heartbeat
-    await client
+    await serviceClient
       .from('jobs')
       .update({ last_heartbeat: new Date().toISOString() })
       .eq('id', jobData.id);
@@ -1609,7 +1609,7 @@ async function runAgentGeneration(
       });
 
       // Store model info for analytics
-      await client
+      await serviceClient
         .from('jobs')
         .update({
           model_info: {
