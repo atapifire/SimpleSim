@@ -1,0 +1,13 @@
+{
+  "analysis": {
+    "totalLength": 652,
+    "startsWithBrace": true,
+    "endsWithBrace": true,
+    "hasCodeBlock": false,
+    "hasJsonKeyword": false,
+    "firstChars": "{\n  \"files\": [\n    {\"path\": \"index.html\", \"content\": \"<!DOCTYPE html><html lang='en'><head><meta cha",
+    "lastChars": "loaded');\"}\n  ],\n  \"description\": \"A simple HTML page displaying 'Hello World' in a large heading\"\n}",
+    "newlineCount": 7
+  },
+  "rawResponse": "{\n  \"files\": [\n    {\"path\": \"index.html\", \"content\": \"<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Hello World</title><link rel='stylesheet' href='style.css'></head><body><h1 id='heading'>Hello World</h1><script src='script.js'></script></body></html>\"},\n    {\"path\": \"style.css\", \"content\": \"body { font-family: Arial, sans-serif; } #heading { font-size: 64px; text-align: center; margin-top: 20vh; }\"},\n    {\"path\": \"script.js\", \"content\": \"console.log('Page loaded');\"}\n  ],\n  \"description\": \"A simple HTML page displaying 'Hello World' in a large heading\"\n}"
+}

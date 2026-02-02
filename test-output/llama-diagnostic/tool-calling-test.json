@@ -1,0 +1,15 @@
+{
+  "toolCallsReceived": 1,
+  "toolCalls": [
+    {
+      "type": "function",
+      "index": 0,
+      "id": "chatcmpl-tool-8147406d4a85173d",
+      "function": {
+        "name": "write_file",
+        "arguments": "{\"path\": \"index.html\", \"content\": \"<h1>Hello World</h1>\"}"
+      }
+    }
+  ],
+  "textResponse": ""
+}

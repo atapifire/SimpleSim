@@ -1,0 +1,21 @@
+{
+  "iterations": 5,
+  "finished": false,
+  "files": [
+    {
+      "path": "index.html",
+      "length": 985,
+      "preview": "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>3D Scene</title><style></style></head><body><script type=\"import"
+    },
+    {
+      "path": "style.css",
+      "length": 0,
+      "preview": ""
+    },
+    {
+      "path": "script.js",
+      "length": 0,
+      "preview": ""
+    }
+  ]
+}

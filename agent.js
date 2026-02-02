@@ -1128,11 +1128,16 @@ function buildAgentTechnicalNotes(prompt) {
 
     // 3D/Three.js projects
     if (promptLower.includes('three') || promptLower.includes('3d') || promptLower.includes('webgl')) {
-        notes.push('For Three.js/3D:');
-        notes.push('- Use WASD for desktop movement');
-        notes.push('- Use nipple.js (https://esm.sh/nipplejs) for mobile controls');
-        notes.push('- Clamp vertical camera rotation between -PI/2 and PI/2');
-        notes.push('- Prioritize smooth frame rates over visual complexity');
+        notes.push('For Three.js/3D - CRITICAL SETUP:');
+        notes.push('1. Add import map in HTML <head>:');
+        notes.push('   <script type="importmap">{"imports":{"three":"https://esm.sh/three@0.160.0"}}</script>');
+        notes.push('2. Use type="module" on your script tag:');
+        notes.push('   <script type="module" src="script.js"></script>');
+        notes.push('3. In script.js, import Three.js:');
+        notes.push('   import * as THREE from "three";');
+        notes.push('4. Use WASD for desktop movement');
+        notes.push('5. Use nipple.js for mobile controls');
+        notes.push('6. Clamp camera rotation between -PI/2 and PI/2');
     }
 
     // Game projects
@@ -1150,11 +1155,15 @@ function buildAgentTechnicalNotes(prompt) {
         notes.push('- Do NOT use howler.js or other audio libraries');
     }
 
-    // External libraries
-    if (promptLower.includes('library') || promptLower.includes('import') || promptLower.includes('package')) {
-        notes.push('For external libraries:');
-        notes.push('- Use esm.sh CDN: import { x } from "https://esm.sh/package"');
-        notes.push('- Add import maps in the HTML head section');
+    // External libraries / ES modules
+    if (promptLower.includes('library') || promptLower.includes('import') || promptLower.includes('package') ||
+        promptLower.includes('chart') || promptLower.includes('gsap') || promptLower.includes('pixi')) {
+        notes.push('For external libraries (CRITICAL):');
+        notes.push('1. Add import map in HTML <head>:');
+        notes.push('   <script type="importmap">{"imports":{"lib":"https://esm.sh/lib-name"}}</script>');
+        notes.push('2. MUST use type="module" on script tags that use import/export:');
+        notes.push('   <script type="module" src="script.js"></script>');
+        notes.push('3. Without type="module", you get "Cannot use import statement" error');
     }
 
     return notes.length > 0 ? notes.join('\n') : '';

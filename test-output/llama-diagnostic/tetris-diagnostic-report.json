@@ -1,0 +1,47 @@
+{
+  "model": "meta-llama/llama-3.3-70b-instruct:free",
+  "prompt": "Create a Tetris game with:\n- A 10x20 game board with colored falling pieces\n- All 7 standard Tetris pieces (I, O, T, S, Z, J, L)\n- Arrow keys to move/rotate pieces\n- Piece collision detection\n- Line c...",
+  "totalIterations": 1,
+  "results": [
+    {
+      "iteration": 1,
+      "files": [
+        {
+          "path": "index.html",
+          "length": 339
+        },
+        {
+          "path": "style.css",
+          "length": 192
+        },
+        {
+          "path": "script.js",
+          "length": 4111
+        }
+      ],
+      "parseResult": [
+        {
+          "strategy": "json-block",
+          "success": true
+        }
+      ],
+      "codeAnalysis": {
+        "issues": [],
+        "warnings": []
+      },
+      "renderResult": {
+        "errorCount": 0,
+        "errors": [],
+        "pageInfo": {
+          "title": "Tetris",
+          "bodyText": "Score: 0",
+          "elementCount": 10,
+          "hasCanvas": true,
+          "canvasCount": 1,
+          "scriptCount": 1
+        }
+      }
+    }
+  ],
+  "finalSuccess": true
+}
