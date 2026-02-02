@@ -215,7 +215,15 @@ async function handlePinConfirm() {
             console.log('[Background Jobs] Storing Share B locally...');
             await storeShareBLocally(shareB, pin);
 
+            // Clear client-side key state to avoid confusion
+            // When using server keys, we don't want stale client-side key data
+            if (security.isUnlocked()) {
+                console.log('[Background Jobs] Clearing client-side key state (switching to server keys)');
+                security.lock();
+            }
+
             state.settings.hasServerKey = true;
+            state.settings.useBackgroundJobs = true;
             callbacks.saveSettings();
             callbacks.updateUI();
             closePinModal();

@@ -778,7 +778,14 @@ export function getApiKey() {
         devError('getApiKey: Session marked as unlocked but no API key in state!');
     }
 
-    // Fall back to client-side key (legacy)
+    // If user has server keys configured, DON'T fall back to client-side key
+    // This prevents using stale/invalid client keys when server keys are the intended mode
+    if (state.settings?.hasServerKey || state.settings?.useBackgroundJobs) {
+        devLog('getApiKey: Server key mode configured but session not unlocked');
+        return null;
+    }
+
+    // Fall back to client-side key (legacy) - only when NOT using server keys
     // Import dynamically to avoid circular dependency
     try {
         // security module stores decrypted key in memory

@@ -384,8 +384,8 @@ export function updateUI() {
             els.keyStatusIndicator.className = `text-xs px-2 py-0.5 rounded border flex items-center gap-1 ${isUnlocked ? 'bg-green-900/20 text-green-400 border-green-900/30' : 'bg-gray-800 text-gray-400 border-gray-700'}`;
         }
 
-        // Fetch models if client key is unlocked
-        if (isUnlocked && els.openRouterModelSelect && els.openRouterModelSelect.children.length <= 7) fetchModels();
+        // Fetch models if client key is unlocked (but NOT if using server keys - that's handled below)
+        if (isUnlocked && !state.settings.hasServerKey && els.openRouterModelSelect && els.openRouterModelSelect.children.length <= 7) fetchModels();
     } else {
         els.openRouterContainer?.classList.add('opacity-50', 'pointer-events-none');
         els.keyStateNone?.classList.remove('hidden');
