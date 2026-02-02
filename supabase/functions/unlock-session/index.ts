@@ -46,7 +46,7 @@ function jsonResponse(data: unknown, status: number = 200): Response {
   });
 }
 
-const FUNCTION_VERSION = '2026-01-31-v4';
+const FUNCTION_VERSION = '2026-02-01-v5-multidevice';
 
 function errorResponse(message: string, status: number = 400): Response {
   return jsonResponse({ error: message, version: FUNCTION_VERSION }, status);
@@ -157,6 +157,7 @@ Deno.serve(async (req) => {
     const body = await req.json();
     const {
       shareB, // Base64 encoded Share B from client
+      deviceId,
       provider = 'openrouter',
       deviceFingerprint,
       sessionDurationHours = 2,
@@ -166,18 +167,43 @@ Deno.serve(async (req) => {
       return errorResponse('Share B is required');
     }
 
+    if (!deviceId) {
+      return errorResponse('Device ID is required');
+    }
+
+    console.log(`[unlock-session] Unlocking session for device: ${deviceId}`);
+
     const serviceClient = createServiceClient();
 
-    // Retrieve Share A from database
+    // Retrieve Share A from database for this specific device
+    // Multi-device: query by user_id + device_id + provider
     const { data: keyRecord, error: keyError } = await serviceClient
       .from('api_keys')
-      .select('id, encrypted_data, is_server_encrypted')
+      .select('id, encrypted_data, is_server_encrypted, device_id')
       .eq('user_id', auth.userId)
+      .eq('device_id', deviceId)
       .eq('provider', provider)
       .single();
 
     if (keyError || !keyRecord) {
-      return errorResponse('API key not found. Please configure your key first.');
+      console.log(`[unlock-session] No key found for device ${deviceId}, checking legacy...`);
+
+      // Fallback: Check for legacy key without device_id (for migration)
+      const { data: legacyKey, error: legacyError } = await serviceClient
+        .from('api_keys')
+        .select('id, encrypted_data, is_server_encrypted')
+        .eq('user_id', auth.userId)
+        .eq('provider', provider)
+        .is('device_id', null)
+        .single();
+
+      if (legacyError || !legacyKey) {
+        return errorResponse('API key not found for this device. Please configure your key first.');
+      }
+
+      console.log(`[unlock-session] Found legacy key, will use it`);
+      // Use legacy key but continue (user should re-setup for proper multi-device support)
+      Object.assign(keyRecord || {}, legacyKey);
     }
 
     if (!keyRecord.is_server_encrypted || !keyRecord.encrypted_data) {
@@ -243,17 +269,22 @@ Deno.serve(async (req) => {
                      'unknown';
     const userAgent = req.headers.get('user-agent') || 'unknown';
 
-    // Delete any existing sessions for this user
+    // Delete any existing session for THIS DEVICE only (not other devices)
+    // This allows multiple devices to have concurrent sessions
     await serviceClient
       .from('active_sessions')
       .delete()
-      .eq('user_id', auth.userId);
+      .eq('user_id', auth.userId)
+      .eq('device_id', deviceId);
 
-    // Create new session
+    console.log(`[unlock-session] Creating session for device: ${deviceId}`);
+
+    // Create new session for this device
     const { error: sessionError } = await serviceClient
       .from('active_sessions')
       .insert({
         user_id: auth.userId,
+        device_id: deviceId,
         session_token_hash: sessionTokenHash,
         encrypted_combined_key: JSON.stringify(encryptedKeyData),
         device_fingerprint: deviceFingerprint || null,
@@ -274,6 +305,7 @@ Deno.serve(async (req) => {
       event_category: 'auth',
       details: {
         provider,
+        device_id: deviceId,
         session_duration_hours: sessionDurationHours,
         device_fingerprint: deviceFingerprint ? 'provided' : 'not_provided',
       },
@@ -281,12 +313,15 @@ Deno.serve(async (req) => {
       user_agent: userAgent.substring(0, 500),
     });
 
+    console.log(`[unlock-session] Session created for device ${deviceId}, expires at ${expiresAt.toISOString()}`);
+
     return jsonResponse({
       success: true,
       sessionToken, // Client stores this to prove session ownership
+      deviceId,
       expiresAt: expiresAt.toISOString(),
       apiKey, // Return key for client-side use (stored in memory only, not persisted)
-      message: 'Session unlocked. You can now close this tab and jobs will continue.',
+      message: 'Session unlocked for this device. You can now close this tab and jobs will continue.',
     });
 
   } catch (error) {

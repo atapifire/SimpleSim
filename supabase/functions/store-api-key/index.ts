@@ -41,7 +41,7 @@ function jsonResponse(data: unknown, status: number = 200): Response {
   });
 }
 
-const FUNCTION_VERSION = '2026-01-31-v4';
+const FUNCTION_VERSION = '2026-02-01-v5-multidevice';
 
 function errorResponse(message: string, status: number = 400): Response {
   return jsonResponse({ error: message, version: FUNCTION_VERSION }, status);
@@ -154,6 +154,8 @@ Deno.serve(async (req) => {
     const body = await req.json();
     const {
       apiKey,
+      deviceId,
+      deviceLabel,
       provider = 'openrouter',
       label = 'Default Key',
       trainingOptOut = true,
@@ -164,6 +166,13 @@ Deno.serve(async (req) => {
     if (!apiKey || typeof apiKey !== 'string') {
       return errorResponse('API key is required');
     }
+
+    // Device ID is required for multi-device support
+    if (!deviceId || typeof deviceId !== 'string') {
+      return errorResponse('Device ID is required');
+    }
+
+    console.log(`[store-api-key] Storing key for device: ${deviceId}`);
 
     // Basic format validation for OpenRouter keys
     if (provider === 'openrouter' && !apiKey.startsWith('sk-or-')) {
@@ -191,18 +200,21 @@ Deno.serve(async (req) => {
     // Use service client to bypass RLS for upsert
     const serviceClient = createServiceClient();
 
-    // Check if user already has a key for this provider
+    // Check if user already has a key for this device and provider
+    // Multi-device: query by user_id + device_id + provider
     const { data: existingKey } = await serviceClient
       .from('api_keys')
       .select('id')
       .eq('user_id', auth.userId)
+      .eq('device_id', deviceId)
       .eq('provider', provider)
       .single();
 
     let keyId: string;
 
     if (existingKey) {
-      // Update existing key
+      // Update existing key for this device
+      console.log(`[store-api-key] Updating existing key for device: ${deviceId}`);
       const { error } = await serviceClient
         .from('api_keys')
         .update({
@@ -210,6 +222,7 @@ Deno.serve(async (req) => {
           share_a_vault_id: null,
           share_b_encrypted: null,
           key_label: label,
+          device_label: deviceLabel || null,
           training_opt_out: trainingOptOut,
           min_age_requirement: minAgeRequirement,
           is_server_encrypted: true,
@@ -224,11 +237,14 @@ Deno.serve(async (req) => {
 
       keyId = existingKey.id;
     } else {
-      // Insert new key
+      // Insert new key for this device
+      console.log(`[store-api-key] Creating new key for device: ${deviceId}`);
       const { data: newKey, error } = await serviceClient
         .from('api_keys')
         .insert({
           user_id: auth.userId,
+          device_id: deviceId,
+          device_label: deviceLabel || null,
           provider,
           encrypted_data: shareAData,
           key_label: label,
@@ -252,15 +268,21 @@ Deno.serve(async (req) => {
       user_id: auth.userId,
       event_type: existingKey ? 'key_updated' : 'key_created',
       event_category: 'key_management',
-      details: { provider, key_id: keyId },
+      details: {
+        provider,
+        key_id: keyId,
+        device_id: deviceId,
+        device_label: deviceLabel || null,
+      },
     });
 
     // Return Share B to client for local storage
     return jsonResponse({
       success: true,
       keyId,
+      deviceId,
       shareB: toBase64(shareB),
-      message: 'API key securely stored. Save Share B locally.',
+      message: 'API key securely stored for this device. Save Share B locally.',
     });
 
   } catch (error) {

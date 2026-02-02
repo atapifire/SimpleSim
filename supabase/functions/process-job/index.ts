@@ -942,6 +942,8 @@ Deno.serve(async (req) => {
 
 /**
  * Get decrypted API key from user's active session
+ * Multi-device support: finds ANY valid session for the user (from any device)
+ * Since all devices share the same underlying API key, any session will work
  */
 async function getApiKeyFromSession(
   client: ReturnType<typeof createServiceClient>,
@@ -949,11 +951,14 @@ async function getApiKeyFromSession(
 ): Promise<string | null> {
   console.log(`[getApiKeyFromSession] Looking for session for user ${userId}`);
 
+  // Query for any valid session for this user (across all devices)
+  // Order by expires_at DESC to prefer sessions with longest remaining time
   const { data: session, error: sessionError } = await client
     .from('active_sessions')
-    .select('encrypted_combined_key, expires_at')
+    .select('encrypted_combined_key, expires_at, device_id')
     .eq('user_id', userId)
     .gt('expires_at', new Date().toISOString())
+    .order('expires_at', { ascending: false })
     .limit(1);
 
   if (sessionError) {
@@ -972,7 +977,7 @@ async function getApiKeyFromSession(
     return null;
   }
 
-  console.log(`[getApiKeyFromSession] Found session expiring at ${activeSession.expires_at}`);
+  console.log(`[getApiKeyFromSession] Found session from device ${activeSession.device_id || 'legacy'}, expiring at ${activeSession.expires_at}`);
 
   try {
     const encryptedData = JSON.parse(activeSession.encrypted_combined_key);

@@ -18,6 +18,63 @@ const STORE_KEY_URL = `${SUPABASE_URL}/functions/v1/store-api-key`;
 const UNLOCK_SESSION_URL = `${SUPABASE_URL}/functions/v1/unlock-session`;
 const AUTH_TEST_URL = `${SUPABASE_URL}/functions/v1/auth-test`;
 
+// Device ID storage key
+const DEVICE_ID_KEY = 'simplesim_device_id';
+
+/**
+ * Get or create a persistent device ID
+ * This uniquely identifies this browser/device for multi-device key support
+ * @returns {string} A unique device ID
+ */
+export function getDeviceId() {
+    let deviceId = localStorage.getItem(DEVICE_ID_KEY);
+    if (!deviceId) {
+        // Generate a new device ID using crypto.randomUUID if available, otherwise fallback
+        if (crypto.randomUUID) {
+            deviceId = crypto.randomUUID();
+        } else {
+            // Fallback for older browsers
+            deviceId = 'dev-' + Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 9);
+        }
+        localStorage.setItem(DEVICE_ID_KEY, deviceId);
+        devLog('Generated new device ID:', deviceId);
+    }
+    return deviceId;
+}
+
+/**
+ * Get the storage key for Share B for this device
+ * Each device has its own Share B stored separately
+ */
+function getShareBStorageKey() {
+    const deviceId = getDeviceId();
+    return `simplesim_share_b_${deviceId}`;
+}
+
+/**
+ * Generate a user-friendly device label
+ * Used for identifying devices in settings UI
+ */
+function getDeviceLabel() {
+    const ua = navigator.userAgent;
+    let label = 'Unknown Device';
+
+    // Detect OS - check iOS first since iOS UA contains "like Mac OS X"
+    if (ua.includes('iPhone') || ua.includes('iPad')) label = 'iOS';
+    else if (ua.includes('Android')) label = 'Android';
+    else if (ua.includes('Windows')) label = 'Windows';
+    else if (ua.includes('Mac OS')) label = 'Mac';
+    else if (ua.includes('Linux')) label = 'Linux';
+
+    // Detect browser
+    if (ua.includes('Chrome') && !ua.includes('Edg')) label += ' Chrome';
+    else if (ua.includes('Firefox')) label += ' Firefox';
+    else if (ua.includes('Safari') && !ua.includes('Chrome')) label += ' Safari';
+    else if (ua.includes('Edg')) label += ' Edge';
+
+    return label;
+}
+
 // Note: Job scheduler is triggered by pg_cron (database) or GitHub Actions (backup)
 // Client cannot call scheduler directly as it requires service_role key
 
@@ -512,7 +569,9 @@ export async function storeServerKey(apiKey, options = {}) {
         throw new Error('Not authenticated');
     }
 
+    const deviceId = getDeviceId();
     devLog('User authenticated:', state.user.id);
+    devLog('Device ID:', deviceId);
     devLog('POST to:', STORE_KEY_URL);
 
     try {
@@ -520,6 +579,8 @@ export async function storeServerKey(apiKey, options = {}) {
             method: 'POST',
             body: JSON.stringify({
                 apiKey,
+                deviceId,
+                deviceLabel: options.deviceLabel || getDeviceLabel(),
                 provider: options.provider || 'openrouter',
                 label: options.label || 'Default Key',
                 trainingOptOut: options.trainingOptOut ?? true,
@@ -550,7 +611,7 @@ export async function storeServerKey(apiKey, options = {}) {
 }
 
 /**
- * Encrypt and store Share B locally
+ * Encrypt and store Share B locally (device-specific)
  */
 export async function storeShareBLocally(shareB, pin) {
     const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -560,22 +621,40 @@ export async function storeShareBLocally(shareB, pin) {
 
     const stored = {
         salt: toBase64(salt),
-        data: toBase64(encrypted)
+        data: toBase64(encrypted),
+        deviceId: getDeviceId(),
+        createdAt: new Date().toISOString()
     };
 
+    const storageKey = getShareBStorageKey();
+    localStorage.setItem(storageKey, JSON.stringify(stored));
+    devLog('Share B stored locally (PIN encrypted) for device:', getDeviceId());
+
+    // Also update legacy key for backward compatibility (will be removed later)
+    // This ensures old code paths still work during transition
     localStorage.setItem('simplesim_share_b', JSON.stringify(stored));
-    devLog('Share B stored locally (PIN encrypted)');
 
     return true;
 }
 
 /**
- * Retrieve and decrypt Share B
+ * Retrieve and decrypt Share B (device-specific with legacy fallback)
  */
 export async function retrieveShareB(pin) {
-    const stored = localStorage.getItem('simplesim_share_b');
+    // Try device-specific key first
+    const storageKey = getShareBStorageKey();
+    let stored = localStorage.getItem(storageKey);
+
+    // Fall back to legacy key if device-specific not found
     if (!stored) {
-        throw new Error('No local key share found');
+        stored = localStorage.getItem('simplesim_share_b');
+        if (stored) {
+            devLog('Using legacy Share B storage (will migrate on next save)');
+        }
+    }
+
+    if (!stored) {
+        throw new Error('No local key share found for this device');
     }
 
     const { salt, data } = JSON.parse(stored);
@@ -590,6 +669,9 @@ export async function retrieveShareB(pin) {
  */
 export async function unlockSession(pin, options = {}) {
     devLog('unlockSession called');
+
+    const deviceId = getDeviceId();
+    devLog('Device ID:', deviceId);
 
     // Get Share B from local storage first (before network calls)
     devLog('Retrieving Share B from local storage...');
@@ -611,6 +693,7 @@ export async function unlockSession(pin, options = {}) {
         method: 'POST',
         body: JSON.stringify({
             shareB,
+            deviceId,
             provider: options.provider || 'openrouter',
             deviceFingerprint: fingerprint,
             sessionDurationHours: options.sessionDurationHours || 2
@@ -768,16 +851,25 @@ export async function diagnoseSession() {
 
     // 2. Check server key configuration
     console.log('\n2. SERVER KEY CONFIG:');
-    const hasShareB = !!localStorage.getItem('simplesim_share_b');
+    const deviceId = getDeviceId();
+    const storageKey = getShareBStorageKey();
+    const hasDeviceShareB = !!localStorage.getItem(storageKey);
+    const hasLegacyShareB = !!localStorage.getItem('simplesim_share_b');
+    console.log('   Device ID:', deviceId);
+    console.log('   Device label:', getDeviceLabel());
     console.log('   hasServerKey setting:', state.settings?.hasServerKey || false);
-    console.log('   Share B in localStorage:', hasShareB);
+    console.log('   Device-specific Share B:', hasDeviceShareB);
+    console.log('   Legacy Share B:', hasLegacyShareB);
 
-    if (hasShareB) {
+    const shareBKey = hasDeviceShareB ? storageKey : (hasLegacyShareB ? 'simplesim_share_b' : null);
+    if (shareBKey) {
         try {
-            const shareData = JSON.parse(localStorage.getItem('simplesim_share_b'));
+            const shareData = JSON.parse(localStorage.getItem(shareBKey));
+            console.log('   Share B storage key:', shareBKey);
             console.log('   Share B data keys:', Object.keys(shareData));
             console.log('   Share B salt length:', shareData.salt?.length || 'N/A');
             console.log('   Share B data length:', shareData.data?.length || 'N/A');
+            console.log('   Share B created at:', shareData.createdAt || 'N/A (legacy)');
         } catch (e) {
             console.error('   Share B parse error:', e.message);
         }
@@ -846,7 +938,10 @@ export async function diagnoseSession() {
 
     return {
         user: !!state.user,
-        hasShareB,
+        deviceId,
+        hasShareB: hasDeviceShareB || hasLegacyShareB,
+        hasDeviceShareB,
+        hasLegacyShareB,
         sessionUnlocked: state.sessionUnlocked,
         hasApiKey: !!state.serverApiKey,
         keyValid: state.serverApiKey ? validateApiKeyFormat(state.serverApiKey).valid : false
@@ -1392,31 +1487,44 @@ export async function getJobHistory(limit = 50) {
 // ============================================
 
 /**
- * Check if server key is configured
+ * Check if server key is configured for this device
  */
 export function hasServerKey() {
+    // Check device-specific key first
+    const storageKey = getShareBStorageKey();
+    if (localStorage.getItem(storageKey)) {
+        return true;
+    }
+    // Fall back to legacy key
     return !!localStorage.getItem('simplesim_share_b');
 }
 
 /**
- * Clear local key share
+ * Clear local key share for this device
  */
 export function clearServerKey() {
-    localStorage.removeItem('simplesim_share_b');
+    const storageKey = getShareBStorageKey();
+    localStorage.removeItem(storageKey);
+    localStorage.removeItem('simplesim_share_b'); // Also clear legacy key
     state.sessionUnlocked = false;
-    devLog('Server key cleared');
+    devLog('Server key cleared for device:', getDeviceId());
 }
 
 /**
- * Full reset of server key configuration
+ * Full reset of server key configuration for this device
  * Call this to completely clear the key setup and start fresh
  * Note: This only clears client-side data. Server-side Share A remains
- * until the user sets up a new key (which overwrites it).
+ * until the user sets up a new key (which overwrites it for this device).
  */
 export function resetServerKeySetup() {
-    devLog('Performing full server key reset...');
+    const deviceId = getDeviceId();
+    devLog('Performing full server key reset for device:', deviceId);
 
-    // Clear local Share B
+    // Clear device-specific Share B
+    const storageKey = getShareBStorageKey();
+    localStorage.removeItem(storageKey);
+
+    // Clear legacy Share B
     localStorage.removeItem('simplesim_share_b');
 
     // Clear session state
@@ -1430,9 +1538,9 @@ export function resetServerKeySetup() {
         state.settings.hasServerKey = false;
     }
 
-    devLog('Server key reset complete. User must re-setup their API key.');
+    devLog('Server key reset complete for device:', deviceId);
 
-    return { success: true, message: 'Server key configuration cleared. Please set up your API key again.' };
+    return { success: true, message: 'Server key configuration cleared. Please set up your API key again.', deviceId };
 }
 
 // Make resetServerKeySetup available globally for console debugging
@@ -1445,7 +1553,9 @@ if (typeof window !== 'undefined') {
  * Returns true if user should be prompted to enter PIN
  */
 export function sessionNeedsUnlock() {
-    const hasShareB = !!localStorage.getItem('simplesim_share_b');
+    // Check device-specific key first, then legacy
+    const storageKey = getShareBStorageKey();
+    const hasShareB = !!localStorage.getItem(storageKey) || !!localStorage.getItem('simplesim_share_b');
     const hasApiKey = !!state.serverApiKey;
 
     // Session needs unlock if we have the local share but no API key in memory
