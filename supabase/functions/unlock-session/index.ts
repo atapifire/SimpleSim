@@ -132,6 +132,7 @@ Deno.serve(async (req) => {
       envCheck: {
         SUPABASE_URL: SUPABASE_URL ? 'set' : 'NOT SET',
         SUPABASE_ANON_KEY: SUPABASE_ANON_KEY ? 'set' : 'NOT SET',
+        SUPABASE_SERVICE_ROLE_KEY: SUPABASE_SERVICE_ROLE_KEY ? 'set' : 'NOT SET',
         SERVER_PEPPER: SERVER_PEPPER ? 'set' : 'NOT SET',
         SESSION_SECRET: SESSION_SECRET ? 'set' : 'NOT SET',
       }
@@ -172,6 +173,12 @@ Deno.serve(async (req) => {
     }
 
     console.log(`[unlock-session] Unlocking session for device: ${deviceId}`);
+
+    // Verify service role key is configured
+    if (!SUPABASE_SERVICE_ROLE_KEY) {
+      console.error('[unlock-session] CRITICAL: SUPABASE_SERVICE_ROLE_KEY not configured');
+      return errorResponse('Server configuration error: Missing service role key', 500);
+    }
 
     const serviceClient = createServiceClient();
 

@@ -127,6 +127,7 @@ Deno.serve(async (req) => {
       envCheck: {
         SUPABASE_URL: SUPABASE_URL ? 'set' : 'NOT SET',
         SUPABASE_ANON_KEY: SUPABASE_ANON_KEY ? 'set' : 'NOT SET',
+        SUPABASE_SERVICE_ROLE_KEY: SUPABASE_SERVICE_ROLE_KEY ? 'set' : 'NOT SET',
         SERVER_PEPPER: SERVER_PEPPER ? 'set' : 'NOT SET',
       }
     });

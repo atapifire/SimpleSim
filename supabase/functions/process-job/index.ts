@@ -842,9 +842,27 @@ Deno.serve(async (req) => {
   }
 
   try {
+    // Verify environment variables are set
+    const envCheck = {
+      SUPABASE_URL: !!Deno.env.get('SUPABASE_URL'),
+      SUPABASE_SERVICE_ROLE_KEY: !!Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'),
+      SESSION_SECRET: !!Deno.env.get('SESSION_ENCRYPTION_SECRET') || !!Deno.env.get('API_KEY_ENCRYPTION_SECRET'),
+    };
+    console.log('[process-job] Environment check:', envCheck);
+
+    if (!envCheck.SUPABASE_URL || !envCheck.SUPABASE_SERVICE_ROLE_KEY) {
+      console.error('[process-job] CRITICAL: Missing required environment variables');
+      return errorResponse('Server configuration error: Missing Supabase credentials', 500);
+    }
+
     console.log('[process-job] Creating service client...');
     serviceClient = createServiceClient();
-    console.log('[process-job] Service client created');
+
+    if (!serviceClient) {
+      console.error('[process-job] CRITICAL: createServiceClient returned null/undefined');
+      return errorResponse('Server configuration error: Failed to create service client', 500);
+    }
+    console.log('[process-job] Service client created successfully');
     // Check for specific job ID in request body, or claim next pending
     const body = await req.json().catch(() => ({}));
 
