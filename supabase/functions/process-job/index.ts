@@ -1444,7 +1444,7 @@ async function runAgentGeneration(
         for (let attempt = 1; attempt <= maxTransientRetries; attempt++) {
           try {
             await updateJobStatus(serviceClient, jobData.id,
-              `Iteration ${currentIteration + 1}: Calling AI model...`
+              `Iteration ${iteration}: Calling AI model...`
             );
 
             response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -1651,7 +1651,7 @@ async function runAgentGeneration(
           // Generate human-readable status message for this tool
           const toolStatusMsg = getToolStatusMessage(toolName, toolArgs);
           await updateJobStatus(serviceClient, jobData.id,
-            `Iteration ${currentIteration + 1}: ${toolStatusMsg}`
+            `Iteration ${iteration}: ${toolStatusMsg}`
           );
 
           await logger.debug(`Executing tool: ${toolName}`, {
