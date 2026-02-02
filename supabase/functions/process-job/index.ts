@@ -1710,7 +1710,7 @@ async function runAgentGeneration(
       }
 
       // Save progress after each iteration
-      await client.rpc('update_job_progress', {
+      await serviceClient.rpc('update_job_progress', {
         p_job_id: jobData.id,
         p_iteration: iteration,
         p_working_files: workingFiles,
