@@ -1017,8 +1017,8 @@ Deno.serve(async (req) => {
     console.error('[process-job] Error stack:', error.stack);
     console.error('[process-job] Error stringified:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
 
-    // Mark the job as failed if we have a job ID
-    if (jobData?.id) {
+    // Mark the job as failed if we have a job ID and service client
+    if (jobData?.id && serviceClient) {
       const errorMessage = error.message || 'Unknown error during job processing';
       console.log(`[process-job] Marking job ${jobData.id} as failed with message: ${errorMessage}`);
       try {
@@ -1030,6 +1030,8 @@ Deno.serve(async (req) => {
       } catch (failError) {
         console.error('[process-job] Failed to mark job as failed:', failError);
       }
+    } else if (jobData?.id && !serviceClient) {
+      console.error(`[process-job] Cannot mark job ${jobData.id} as failed - service client not initialized`);
     }
 
     return errorResponse('Job processing failed: ' + error.message, 500);
