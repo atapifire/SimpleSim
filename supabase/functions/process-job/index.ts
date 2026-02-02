@@ -1344,7 +1344,7 @@ async function runAgentGeneration(
   jobData: JobData,
   apiKey: string,
   headers: HeadersInit,
-  client: ReturnType<typeof createServiceClient>,
+  serviceClient: ReturnType<typeof createServiceClient>,
   startTime: number
 ): Promise<{ files: FileResult[]; description: string; iterations: number }> {
   const isNewProject = !jobData.current_files || jobData.current_files.length === 0;
