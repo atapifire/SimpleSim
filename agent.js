@@ -11,9 +11,10 @@ import { analyzeProjectHealth, generateCodeMap, estimateTokens, formatTokenCount
 import { checkModelToolSupport } from './ai.js';
 import { getApiKey } from './job-queue.js';
 import { getModelProfile, getPromptStyle } from './model-profiles.js';
-import { applyEdits, validateEdits, validateFileSyntax, validateAndRepairFiles } from './file-ops.js';
+import { applyEdits, validateEdits, validateFileSyntax, validateAndRepairFiles, analyzeDomReferences } from './file-ops.js';
 import { getPreviewErrors, clearPreviewErrors, renderProject } from './renderer.js';
 import { TECHNICAL_GUIDELINES, getLibraryInstructions } from './protocol-data.js';
+import { formatLibraryDocs, detectLibraries, analyzeLibraryError, searchLibraries, getCategories } from './library-catalog.js';
 import {
     buildAgentSystemPrompt as buildAgentSystemPromptBase,
     buildAgentUserMessage,
@@ -26,25 +27,33 @@ import {
 const MAX_ITERATIONS = 10;
 const API_TIMEOUT = 180000;
 
-// Starter template for new projects - ensures all models have a foundation
-const STARTER_TEMPLATE = {
-    path: 'index.html',
-    content: `<!DOCTYPE html>
+// Starter template for new projects - minimal foundation
+// No styling frameworks are forced - models choose what they need
+const STARTER_FILES = [
+    {
+        path: 'index.html',
+        content: `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Project</title>
-    <script src="https://cdn.twind.style" crossorigin></script>
+    <title>New Project</title>
+    <link rel="stylesheet" href="style.css">
 </head>
-<body class="min-h-screen bg-gray-100">
-    <div class="container mx-auto px-4 py-8">
-        <h1 class="text-3xl font-bold text-gray-800 mb-4">Welcome</h1>
-        <p class="text-gray-600">Edit this template to build your website.</p>
-    </div>
+<body>
+    <script src="script.js"></script>
 </body>
 </html>`
-};
+    },
+    {
+        path: 'style.css',
+        content: `/* Add your styles here */`
+    },
+    {
+        path: 'script.js',
+        content: `// Add your JavaScript here`
+    }
+];
 
 // Working files state during agent execution
 let workingFiles = [];
@@ -243,6 +252,57 @@ const TOOLS = [
     {
         type: "function",
         function: {
+            name: "check_dom",
+            description: "Statically analyze HTML and JavaScript files to detect DOM element mismatches. Finds when JavaScript references elements (via getElementById, querySelector) that don't exist in HTML. Call this BEFORE finish() to catch common runtime errors.",
+            parameters: {
+                type: "object",
+                properties: {},
+                required: []
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "get_library_docs",
+            description: "Get documentation, CDN links, usage examples, and troubleshooting info for a library. Use this when you need to use a library you're not familiar with, or when debugging library-related errors. Available libraries include: Three.js, Chart.js, GSAP, PixiJS, Leaflet, React, Vue, D3, Tone.js, Zod, Day.js, and more. Also covers Web APIs like localStorage, IndexedDB, and WebAudio.",
+            parameters: {
+                type: "object",
+                properties: {
+                    library: {
+                        type: "string",
+                        description: "Library name (e.g., 'three', 'chart.js', 'gsap', 'localStorage')"
+                    },
+                    query_type: {
+                        type: "string",
+                        enum: ["overview", "usage", "errors", "cdn"],
+                        description: "Type of information needed: 'overview' (summary), 'usage' (examples), 'errors' (troubleshooting), 'cdn' (import links)"
+                    }
+                },
+                required: ["library"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
+            name: "search_libraries",
+            description: "Search for libraries by name, category, or description. Use when you're not sure which library to use for a task. Categories include: 3d, 2d, animation, charts, audio, maps, ui-framework, styling, web-api, validation, utility.",
+            parameters: {
+                type: "object",
+                properties: {
+                    query: {
+                        type: "string",
+                        description: "Search query (library name, category, or description)"
+                    }
+                },
+                required: ["query"]
+            }
+        }
+    },
+    {
+        type: "function",
+        function: {
             name: "finish",
             description: "Signal that all changes are complete and ready to commit",
             parameters: {
@@ -325,6 +385,19 @@ function validateProjectBeforeFinish() {
         const validation = validateFileSyntax(file.path, file.content);
         if (!validation.valid) {
             issues.push(`${file.path} has syntax errors: ${validation.error}`);
+        }
+    }
+
+    // 6. Check for DOM element mismatches (common cause of null reference errors)
+    const domAnalysis = analyzeDomReferences(workingFiles);
+    if (!domAnalysis.valid) {
+        for (const issue of domAnalysis.issues) {
+            let msg = `DOM mismatch in ${issue.file}: ${issue.ids.join(', ')}`;
+            if (issue.suggestions && Object.keys(issue.suggestions).length > 0) {
+                const firstSuggestion = Object.entries(issue.suggestions)[0];
+                msg += ` (did you mean "${firstSuggestion[1][0]}" instead of "${firstSuggestion[0]}"?)`;
+            }
+            issues.push(msg);
         }
     }
 
@@ -563,15 +636,112 @@ function executeTool(name, args) {
             const formattedConsoleErrors = errors.consoleErrors.map(e => e.message);
             const formattedWarns = errors.consoleWarns.map(e => e.message);
 
+            // Analyze errors for library-specific issues
+            const allCode = workingFiles.map(f => f.content).join('\n');
+            const allErrorMessages = [
+                ...errors.errors.map(e => e.message),
+                ...errors.consoleErrors.map(e => e.message)
+            ].join(' ');
+
+            const libraryAnalysis = analyzeLibraryError(allErrorMessages, allCode);
+
+            // Build hint with library-specific suggestions
+            let hint = errors.hasErrors
+                ? 'Fix the errors above. Common issues: null element references, undefined variables, missing DOM elements.'
+                : 'Only warnings detected. Consider reviewing if they indicate potential issues.';
+
+            if (libraryAnalysis.hasLibraryRelatedError) {
+                const libSuggestions = libraryAnalysis.suggestions.map(s =>
+                    `${s.library}: ${s.solution}`
+                ).join('\n  ');
+                hint += `\n\nLibrary-specific suggestions:\n  ${libSuggestions}`;
+                hint += '\n\nUse get_library_docs("' + libraryAnalysis.suggestions[0]?.library + '", "errors") for more troubleshooting info.';
+            }
+
             return {
                 success: true,
                 hasErrors: errors.hasErrors,
                 runtimeErrors: formattedErrors,
                 consoleErrors: formattedConsoleErrors,
                 warnings: formattedWarns,
-                hint: errors.hasErrors
-                    ? 'Fix the errors above. Common issues: null element references, undefined variables, missing DOM elements.'
-                    : 'Only warnings detected. Consider reviewing if they indicate potential issues.'
+                detectedLibraries: libraryAnalysis.detectedLibraries,
+                librarySuggestions: libraryAnalysis.suggestions.length > 0 ? libraryAnalysis.suggestions : undefined,
+                hint
+            };
+        }
+
+        case 'check_dom': {
+            // Static analysis to detect DOM element mismatches
+            const analysis = analyzeDomReferences(workingFiles);
+
+            if (analysis.valid) {
+                return {
+                    success: true,
+                    valid: true,
+                    message: 'All JavaScript element references match HTML IDs.',
+                    htmlIds: analysis.htmlIds,
+                    jsIds: analysis.jsIds
+                };
+            }
+
+            // Format issues with suggestions
+            const formattedIssues = analysis.issues.map(issue => {
+                let msg = issue.message;
+                if (issue.suggestions && Object.keys(issue.suggestions).length > 0) {
+                    const suggestionParts = Object.entries(issue.suggestions)
+                        .map(([missing, similar]) => `"${missing}" -> did you mean "${similar[0]}"?`)
+                        .join('; ');
+                    msg += ` Suggestions: ${suggestionParts}`;
+                }
+                return {
+                    file: issue.file,
+                    missingIds: issue.ids,
+                    message: msg
+                };
+            });
+
+            return {
+                success: true,
+                valid: false,
+                issues: formattedIssues,
+                htmlIds: analysis.htmlIds,
+                jsIds: analysis.jsIds,
+                hint: 'JavaScript references elements that do not exist in HTML. This will cause "Cannot read properties of null" errors. Fix the element IDs to match exactly.'
+            };
+        }
+
+        case 'get_library_docs': {
+            const queryType = args.query_type || 'overview';
+            const docs = formatLibraryDocs(args.library, queryType);
+            return {
+                success: true,
+                documentation: docs,
+                hint: 'Use this documentation to implement the library correctly. Check "errors" query_type if you encounter issues.'
+            };
+        }
+
+        case 'search_libraries': {
+            const results = searchLibraries(args.query);
+            if (results.length === 0) {
+                // Also try category search
+                const categories = getCategories();
+                return {
+                    success: true,
+                    results: [],
+                    message: `No libraries found matching "${args.query}".`,
+                    availableCategories: categories,
+                    hint: `Try searching by category: ${categories.join(', ')}`
+                };
+            }
+            return {
+                success: true,
+                results: results.map(lib => ({
+                    id: lib.id,
+                    name: lib.name,
+                    category: lib.category,
+                    description: lib.description
+                })),
+                message: `Found ${results.length} library(ies). Use get_library_docs for detailed information.`
             };
         }
 
@@ -618,8 +788,8 @@ WORKFLOW FOR NEW PROJECT:
 3. Build the complete site - don't stop after just one file
 4. Use write_file for new files, edit_file for modifications
 5. Validate each file after creating/editing (validate_file)
-6. Test with preview_site(), then get_preview_errors() to catch runtime issues
-7. If errors found, fix them before calling finish()
+6. CRITICAL: Call check_dom() to detect element ID mismatches between HTML and JS
+7. If check_dom reports issues, FIX THEM - these cause null reference errors!
 8. Ensure the project is COMPLETE before calling finish()`
         : `
 WORKFLOW FOR MODIFICATIONS:
@@ -628,8 +798,8 @@ WORKFLOW FOR MODIFICATIONS:
 3. Plan your changes - what files need modification?
 4. Use edit_file for small changes, write_file for major rewrites
 5. Validate changes with validate_file
-6. Test with preview_site(), then get_preview_errors() to catch runtime issues
-7. If errors found, fix them (common: null references, undefined vars, missing elements)
+6. CRITICAL: Call check_dom() to verify element IDs match between HTML and JS
+7. If check_dom reports mismatches, fix them (e.g., "game" vs "game-container")
 8. Call finish() only when ALL requested changes are complete and error-free`;
 
     // Add context-aware technical notes
@@ -640,15 +810,15 @@ WORKFLOW FOR MODIFICATIONS:
 COMPLETION REQUIREMENTS (CRITICAL):
 - finish() will FAIL if index.html is missing or empty
 - finish() will FAIL if referenced CSS/JS files don't exist
+- finish() will FAIL if check_dom() finds element ID mismatches
 - You must create a COMPLETE, working website
 - For any request beyond basic text, create separate styles.css and script.js
-- ALWAYS call preview_site() then get_preview_errors() before finish()
-- If get_preview_errors() shows errors, FIX THEM before calling finish()
-- Common runtime errors to check:
-  * "Cannot read properties of null" - DOM element not found (check ID/selector)
-  * "is not defined" - missing variable or function declaration
-  * "appendChild" errors - trying to append to null element
-- Do NOT call finish() until the site runs without errors`;
+- ALWAYS call check_dom() before finish() - this catches the #1 cause of errors!
+- If check_dom() shows mismatches, FIX THEM:
+  * "gameContainer" in JS but "game-container" in HTML -> use same ID
+  * "submitBtn" vs "submit-btn" -> make them match exactly
+  * Element IDs are CASE-SENSITIVE
+- Do NOT call finish() until check_dom() returns valid: true`;
 
     // Build the final prompt based on style
     if (style === 'xml-tags') {
@@ -747,8 +917,8 @@ export async function runAgent(prompt, currentFiles) {
     }
 
     // Initialize working state
-    // For new projects, start with a minimal HTML template so all models have a foundation
-    workingFiles = isNewProject ? [{ ...STARTER_TEMPLATE }] : JSON.parse(JSON.stringify(currentFiles));
+    // For new projects, start with minimal HTML/CSS/JS files so models have a foundation
+    workingFiles = isNewProject ? STARTER_FILES.map(f => ({ ...f })) : JSON.parse(JSON.stringify(currentFiles));
     iterationCount = 0;
 
     // Get key from either server session or client-side storage
@@ -989,8 +1159,8 @@ export async function runAgent(prompt, currentFiles) {
         // Create a minimal index.html
         const otherHtmlFiles = workingFiles.filter(f => f.path.endsWith('.html'));
         const links = otherHtmlFiles.length > 0
-            ? otherHtmlFiles.map(f => `<li><a href="${f.path}" class="text-blue-500 hover:underline">${f.path}</a></li>`).join('\n        ')
-            : '<li class="text-gray-500">No additional pages</li>';
+            ? otherHtmlFiles.map(f => `<li><a href="${f.path}">${f.path}</a></li>`).join('\n    ')
+            : '<li>No additional pages</li>';
 
         const fallbackHtml = `<!DOCTYPE html>
 <html lang="en">
@@ -998,18 +1168,23 @@ export async function runAgent(prompt, currentFiles) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Project</title>
-    <script src="https://cdn.twind.style" crossorigin></script>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 1rem; }
+        h1 { font-size: 1.5rem; margin-bottom: 1rem; }
+        ul { margin: 1rem 0; padding-left: 1.5rem; }
+        li { margin: 0.5rem 0; }
+        a { color: #3b82f6; }
+        .note { background: #fef3c7; border: 1px solid #fcd34d; padding: 1rem; border-radius: 0.5rem; margin-top: 2rem; }
+    </style>
 </head>
-<body class="min-h-screen bg-gray-100 p-8">
-    <div class="max-w-2xl mx-auto">
-        <h1 class="text-3xl font-bold text-gray-800 mb-4">Project Files</h1>
-        <p class="text-gray-600 mb-4">The AI created the following files:</p>
-        <ul class="list-disc list-inside space-y-2">
-        ${links}
-        </ul>
-        <div class="mt-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-            <p class="text-yellow-800 text-sm">Note: The AI didn't create a proper index.html. You may want to regenerate.</p>
-        </div>
+<body>
+    <h1>Project Files</h1>
+    <p>The AI created the following files:</p>
+    <ul>
+    ${links}
+    </ul>
+    <div class="note">
+        <p>Note: The AI didn't create a proper index.html. You may want to regenerate.</p>
     </div>
 </body>
 </html>`;

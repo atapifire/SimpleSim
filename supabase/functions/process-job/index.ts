@@ -402,7 +402,6 @@ function repairHTML(content: string): { content: string; repairs: string[]; repa
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Page</title>
-    <script src="https://cdn.twind.style" crossorigin></script>
 </head>`;
       repaired = repaired.substring(0, insertPos) + defaultHead + repaired.substring(insertPos);
       repairs.push('Added default <head> section');
@@ -553,25 +552,33 @@ function validateFileSyntax(
   return { valid: true };
 }
 
-// Starter template for new projects - ensures all models have a foundation
-const STARTER_TEMPLATE: FileResult = {
-  path: 'index.html',
-  content: `<!DOCTYPE html>
+// Starter template for new projects - minimal foundation
+// No styling frameworks are forced - models choose what they need
+const STARTER_FILES: FileResult[] = [
+  {
+    path: 'index.html',
+    content: `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Project</title>
-    <script src="https://cdn.twind.style" crossorigin></script>
+    <title>New Project</title>
+    <link rel="stylesheet" href="style.css">
 </head>
-<body class="min-h-screen bg-gray-100">
-    <div class="container mx-auto px-4 py-8">
-        <h1 class="text-3xl font-bold text-gray-800 mb-4">Welcome</h1>
-        <p class="text-gray-600">Edit this template to build your website.</p>
-    </div>
+<body>
+    <script src="script.js"></script>
 </body>
 </html>`
-};
+  },
+  {
+    path: 'style.css',
+    content: `/* Add your styles here */`
+  },
+  {
+    path: 'script.js',
+    content: `// Add your JavaScript here`
+  }
+];
 
 // Agent tools definition (enhanced with edit_file, read_file_section, validate_file)
 const AGENT_TOOLS = [
@@ -1185,8 +1192,8 @@ async function runSimpleGeneration(
     // Create a minimal index.html
     const otherFiles = parsed.files.filter(f => f.path.endsWith('.html'));
     const links = otherFiles.length > 0
-      ? otherFiles.map(f => `<li><a href="${f.path}" class="text-blue-500 hover:underline">${f.path}</a></li>`).join('\n        ')
-      : '<li class="text-gray-500">No additional pages</li>';
+      ? otherFiles.map(f => `<li><a href="${f.path}">${f.path}</a></li>`).join('\n    ')
+      : '<li>No additional pages</li>';
 
     const fallbackHtml = `<!DOCTYPE html>
 <html lang="en">
@@ -1194,18 +1201,23 @@ async function runSimpleGeneration(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Project</title>
-    <script src="https://cdn.twind.style" crossorigin></script>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 1rem; }
+        h1 { font-size: 1.5rem; margin-bottom: 1rem; }
+        ul { margin: 1rem 0; padding-left: 1.5rem; }
+        li { margin: 0.5rem 0; }
+        a { color: #3b82f6; }
+        .note { background: #fef3c7; border: 1px solid #fcd34d; padding: 1rem; border-radius: 0.5rem; margin-top: 2rem; }
+    </style>
 </head>
-<body class="min-h-screen bg-gray-100 p-8">
-    <div class="max-w-2xl mx-auto">
-        <h1 class="text-3xl font-bold text-gray-800 mb-4">Project Files</h1>
-        <p class="text-gray-600 mb-4">The AI created the following files:</p>
-        <ul class="list-disc list-inside space-y-2">
-        ${links}
-        </ul>
-        <div class="mt-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-            <p class="text-yellow-800 text-sm">Note: The AI didn't create a proper index.html. You may want to regenerate.</p>
-        </div>
+<body>
+    <h1>Project Files</h1>
+    <p>The AI created the following files:</p>
+    <ul>
+    ${links}
+    </ul>
+    <div class="note">
+        <p>Note: The AI didn't create a proper index.html. You may want to regenerate.</p>
     </div>
 </body>
 </html>`;
@@ -1229,10 +1241,10 @@ async function runAgentGeneration(
   const isNewProject = !jobData.current_files || jobData.current_files.length === 0;
 
   // Initialize or restore state
-  // For new projects, start with a minimal HTML template so all models have a foundation
+  // For new projects, start with minimal HTML/CSS/JS files so models have a foundation
   let workingFiles = jobData.working_files.length > 0
     ? jobData.working_files
-    : (isNewProject ? [{ ...STARTER_TEMPLATE }] : [...jobData.current_files]);
+    : (isNewProject ? STARTER_FILES.map(f => ({ ...f })) : [...jobData.current_files]);
 
   let messages = jobData.messages.length > 0
     ? jobData.messages
@@ -1564,8 +1576,8 @@ async function runAgentGeneration(
     // Create a minimal index.html that links to other files
     const otherFiles = workingFiles.filter(f => f.path.endsWith('.html'));
     const links = otherFiles.length > 0
-      ? otherFiles.map(f => `<li><a href="${f.path}" class="text-blue-500 hover:underline">${f.path}</a></li>`).join('\n        ')
-      : '<li class="text-gray-500">No additional pages created</li>';
+      ? otherFiles.map(f => `<li><a href="${f.path}">${f.path}</a></li>`).join('\n    ')
+      : '<li>No additional pages created</li>';
 
     const fallbackHtml = `<!DOCTYPE html>
 <html lang="en">
@@ -1573,18 +1585,23 @@ async function runAgentGeneration(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Project</title>
-    <script src="https://cdn.twind.style" crossorigin></script>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 1rem; }
+        h1 { font-size: 1.5rem; margin-bottom: 1rem; }
+        ul { margin: 1rem 0; padding-left: 1.5rem; }
+        li { margin: 0.5rem 0; }
+        a { color: #3b82f6; }
+        .note { background: #fef3c7; border: 1px solid #fcd34d; padding: 1rem; border-radius: 0.5rem; margin-top: 2rem; }
+    </style>
 </head>
-<body class="min-h-screen bg-gray-100 p-8">
-    <div class="max-w-2xl mx-auto">
-        <h1 class="text-3xl font-bold text-gray-800 mb-4">Project Files</h1>
-        <p class="text-gray-600 mb-4">The AI created the following files:</p>
-        <ul class="list-disc list-inside space-y-2">
-        ${links}
-        </ul>
-        <div class="mt-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-            <p class="text-yellow-800 text-sm">Note: The AI didn't create a proper index.html. You may want to regenerate or edit this project.</p>
-        </div>
+<body>
+    <h1>Project Files</h1>
+    <p>The AI created the following files:</p>
+    <ul>
+    ${links}
+    </ul>
+    <div class="note">
+        <p>Note: The AI didn't create a proper index.html. You may want to regenerate or edit this project.</p>
     </div>
 </body>
 </html>`;

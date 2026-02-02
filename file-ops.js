@@ -403,6 +403,191 @@ export function validateGenerationResult(originalFiles, newFiles, options = {}) 
 }
 
 // ============================================
+// Static DOM Analysis
+// ============================================
+
+/**
+ * Extract element IDs referenced in JavaScript code
+ * Detects patterns like getElementById('id'), querySelector('#id')
+ */
+function extractJsElementIds(jsContent) {
+    const ids = new Set();
+
+    // getElementById('id') or getElementById("id")
+    const getByIdMatches = jsContent.match(/getElementById\s*\(\s*['"]([^'"]+)['"]\s*\)/g) || [];
+    for (const match of getByIdMatches) {
+        const id = match.match(/['"]([^'"]+)['"]/)?.[1];
+        if (id) ids.add(id);
+    }
+
+    // querySelector('#id') or querySelectorAll('#id')
+    const querySelectorMatches = jsContent.match(/querySelector(?:All)?\s*\(\s*['"][^'"]*#([a-zA-Z][a-zA-Z0-9_-]*)[^'"]*['"]\s*\)/g) || [];
+    for (const match of querySelectorMatches) {
+        const idMatch = match.match(/#([a-zA-Z][a-zA-Z0-9_-]*)/);
+        if (idMatch) ids.add(idMatch[1]);
+    }
+
+    return [...ids];
+}
+
+/**
+ * Extract element IDs defined in HTML
+ */
+function extractHtmlIds(htmlContent) {
+    const ids = new Set();
+    const idMatches = htmlContent.match(/\bid\s*=\s*['"]([^'"]+)['"]/gi) || [];
+
+    for (const match of idMatches) {
+        const id = match.match(/['"]([^'"]+)['"]/)?.[1];
+        if (id) ids.add(id);
+    }
+
+    return [...ids];
+}
+
+/**
+ * Analyze project files for DOM element mismatches
+ * Detects when JavaScript references elements that don't exist in HTML
+ *
+ * @param {Array<{path: string, content: string}>} files - Project files
+ * @returns {{valid: boolean, issues: Array<{file: string, ids: string[], message: string}>, htmlIds: string[], jsIds: string[]}}
+ */
+export function analyzeDomReferences(files) {
+    const htmlFiles = files.filter(f => f.path.endsWith('.html') || f.path.endsWith('.htm'));
+    const jsFiles = files.filter(f => f.path.endsWith('.js') || f.path.endsWith('.mjs'));
+
+    // Collect all HTML IDs
+    const allHtmlIds = new Set();
+    for (const htmlFile of htmlFiles) {
+        const ids = extractHtmlIds(htmlFile.content);
+        ids.forEach(id => allHtmlIds.add(id));
+    }
+
+    // Also extract IDs from inline scripts in HTML (they're valid targets)
+    for (const htmlFile of htmlFiles) {
+        const inlineScripts = htmlFile.content.match(/<script[^>]*>([^<]*)<\/script>/gi) || [];
+        for (const script of inlineScripts) {
+            // Skip external scripts
+            if (script.includes('src=')) continue;
+            const content = script.replace(/<\/?script[^>]*>/gi, '');
+            // These are inline scripts - their getElementById calls should match HTML IDs
+        }
+    }
+
+    const issues = [];
+    const allJsIds = new Set();
+
+    // Check each JS file for references to non-existent elements
+    for (const jsFile of jsFiles) {
+        const jsIds = extractJsElementIds(jsFile.content);
+        jsIds.forEach(id => allJsIds.add(id));
+
+        const missing = jsIds.filter(id => !allHtmlIds.has(id));
+
+        if (missing.length > 0) {
+            // Try to suggest similar IDs
+            const suggestions = {};
+            for (const missingId of missing) {
+                const similar = [...allHtmlIds].filter(htmlId => {
+                    // Check for common mismatches
+                    const lowerMissing = missingId.toLowerCase();
+                    const lowerHtml = htmlId.toLowerCase();
+
+                    // Exact case mismatch
+                    if (lowerMissing === lowerHtml) return true;
+
+                    // kebab-case vs camelCase (remove dashes and compare)
+                    if (htmlId.replace(/-/g, '') === missingId.replace(/-/g, '')) return true;
+
+                    // Small typo (Levenshtein distance)
+                    if (levenshteinDistance(lowerMissing, lowerHtml) <= 2) return true;
+
+                    // Substring matching: missing ID is part of HTML ID or vice versa
+                    // This catches 'game' vs 'game-container' or 'container' vs 'game-container'
+                    if (lowerHtml.includes(lowerMissing) || lowerMissing.includes(lowerHtml)) return true;
+
+                    // Word boundary matching: check if missing ID matches a word segment
+                    // 'game' matches 'game-container' because 'game' appears as a word
+                    const htmlWords = lowerHtml.split(/[-_]/);
+                    const missingWords = lowerMissing.split(/[-_]/);
+                    if (htmlWords.some(w => missingWords.includes(w))) return true;
+
+                    return false;
+                });
+                if (similar.length > 0) {
+                    suggestions[missingId] = similar;
+                }
+            }
+
+            issues.push({
+                file: jsFile.path,
+                ids: missing,
+                suggestions,
+                message: `JavaScript references elements not found in HTML: ${missing.join(', ')}`
+            });
+        }
+    }
+
+    // Also check inline scripts
+    for (const htmlFile of htmlFiles) {
+        const scriptMatches = htmlFile.content.match(/<script[^>]*>([^<]+)<\/script>/gi) || [];
+        for (const script of scriptMatches) {
+            if (script.includes('src=')) continue; // Skip external scripts
+            const content = script.replace(/<\/?script[^>]*>/gi, '');
+            const jsIds = extractJsElementIds(content);
+
+            const missing = jsIds.filter(id => !allHtmlIds.has(id));
+            if (missing.length > 0) {
+                issues.push({
+                    file: `inline script in ${htmlFile.path}`,
+                    ids: missing,
+                    message: `Inline script references elements not found: ${missing.join(', ')}`
+                });
+            }
+        }
+    }
+
+    return {
+        valid: issues.length === 0,
+        issues,
+        htmlIds: [...allHtmlIds],
+        jsIds: [...allJsIds]
+    };
+}
+
+/**
+ * Simple Levenshtein distance for typo detection
+ */
+function levenshteinDistance(a, b) {
+    if (a.length === 0) return b.length;
+    if (b.length === 0) return a.length;
+
+    const matrix = [];
+    for (let i = 0; i <= b.length; i++) {
+        matrix[i] = [i];
+    }
+    for (let j = 0; j <= a.length; j++) {
+        matrix[0][j] = j;
+    }
+
+    for (let i = 1; i <= b.length; i++) {
+        for (let j = 1; j <= a.length; j++) {
+            if (b.charAt(i - 1) === a.charAt(j - 1)) {
+                matrix[i][j] = matrix[i - 1][j - 1];
+            } else {
+                matrix[i][j] = Math.min(
+                    matrix[i - 1][j - 1] + 1,
+                    matrix[i][j - 1] + 1,
+                    matrix[i - 1][j] + 1
+                );
+            }
+        }
+    }
+
+    return matrix[b.length][a.length];
+}
+
+// ============================================
 // Helper Functions
 // ============================================
 
@@ -729,7 +914,6 @@ export function repairHTML(content) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Page</title>
-    <script src="https://cdn.twind.style" crossorigin></script>
 </head>`;
             repaired = repaired.substring(0, insertPos) + defaultHead + repaired.substring(insertPos);
             repairs.push('Added default <head> section');

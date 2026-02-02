@@ -4,7 +4,8 @@ import {
     validateEdits,
     mergeWithEdits,
     detectTruncation,
-    validateFileSyntax
+    validateFileSyntax,
+    analyzeDomReferences
 } from '../file-ops.js';
 
 describe('applyEdits', () => {
@@ -145,5 +146,139 @@ describe('validateFileSyntax', () => {
         const css = '.class { color: red;';
         const result = validateFileSyntax('styles.css', css);
         expect(result.valid).toBe(false);
+    });
+});
+
+describe('analyzeDomReferences', () => {
+    it('should detect matching element IDs', () => {
+        const files = [
+            {
+                path: 'index.html',
+                content: '<div id="container"><button id="submit-btn">Submit</button></div>'
+            },
+            {
+                path: 'script.js',
+                content: `
+                    const container = document.getElementById('container');
+                    const btn = document.getElementById('submit-btn');
+                `
+            }
+        ];
+
+        const result = analyzeDomReferences(files);
+        expect(result.valid).toBe(true);
+        expect(result.issues).toHaveLength(0);
+    });
+
+    it('should detect missing element IDs', () => {
+        const files = [
+            {
+                path: 'index.html',
+                content: '<div id="container"></div>'
+            },
+            {
+                path: 'app.js',
+                content: `
+                    const el = document.getElementById('missing-element');
+                    el.textContent = 'Hello';
+                `
+            }
+        ];
+
+        const result = analyzeDomReferences(files);
+        expect(result.valid).toBe(false);
+        expect(result.issues.length).toBeGreaterThan(0);
+        expect(result.issues[0].ids).toContain('missing-element');
+    });
+
+    it('should detect the common appendChild null error pattern', () => {
+        // This is the exact error pattern from the user's DragonTetris project
+        const files = [
+            {
+                path: 'index.html',
+                content: `
+                    <!DOCTYPE html>
+                    <html>
+                    <body>
+                        <div id="game-container"></div>
+                        <script src="game.js"></script>
+                    </body>
+                    </html>
+                `
+            },
+            {
+                path: 'game.js',
+                content: `
+                    // Bug: ID mismatch - 'game' vs 'game-container'
+                    const container = document.getElementById('game');
+                    const canvas = document.createElement('canvas');
+                    container.appendChild(canvas); // Will throw: Cannot read properties of null
+                `
+            }
+        ];
+
+        const result = analyzeDomReferences(files);
+        expect(result.valid).toBe(false);
+        expect(result.issues[0].ids).toContain('game');
+        // Should suggest the correct ID
+        expect(result.issues[0].suggestions).toBeDefined();
+        expect(result.issues[0].suggestions['game']).toContain('game-container');
+    });
+
+    it('should detect querySelector ID references', () => {
+        const files = [
+            {
+                path: 'index.html',
+                content: '<main id="app"></main>'
+            },
+            {
+                path: 'script.js',
+                content: `document.querySelector('#main-content');`
+            }
+        ];
+
+        const result = analyzeDomReferences(files);
+        expect(result.valid).toBe(false);
+        expect(result.issues[0].ids).toContain('main-content');
+    });
+
+    it('should return all HTML and JS IDs for debugging', () => {
+        const files = [
+            {
+                path: 'index.html',
+                content: '<div id="a"></div><span id="b"></span>'
+            },
+            {
+                path: 'app.js',
+                content: `
+                    document.getElementById('a');
+                    document.getElementById('c');
+                `
+            }
+        ];
+
+        const result = analyzeDomReferences(files);
+        expect(result.htmlIds).toContain('a');
+        expect(result.htmlIds).toContain('b');
+        expect(result.jsIds).toContain('a');
+        expect(result.jsIds).toContain('c');
+    });
+
+    it('should detect case sensitivity issues', () => {
+        const files = [
+            {
+                path: 'index.html',
+                content: '<button id="submitBtn"></button>'
+            },
+            {
+                path: 'script.js',
+                content: `document.getElementById('submitbtn');` // lowercase
+            }
+        ];
+
+        const result = analyzeDomReferences(files);
+        expect(result.valid).toBe(false);
+        // Should suggest the correctly-cased ID
+        expect(result.issues[0].suggestions?.['submitbtn']).toContain('submitBtn');
     });
 });

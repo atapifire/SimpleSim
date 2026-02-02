@@ -157,18 +157,22 @@ export async function generateProject(prompt, currentFiles) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Project</title>
-    <script src="https://cdn.twind.style" crossorigin></script>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 2rem auto; padding: 1rem; }
+        h1 { font-size: 1.5rem; margin-bottom: 1rem; }
+        ul { margin: 1rem 0; padding-left: 1.5rem; }
+        li { margin: 0.5rem 0; }
+        .note { background: #fef3c7; border: 1px solid #fcd34d; padding: 1rem; border-radius: 0.5rem; margin-top: 2rem; }
+    </style>
 </head>
-<body class="min-h-screen bg-gray-100 p-8">
-    <div class="max-w-2xl mx-auto">
-        <h1 class="text-3xl font-bold text-gray-800 mb-4">Project Files</h1>
-        <p class="text-gray-600 mb-4">The AI created the following files:</p>
-        <ul class="list-disc list-inside space-y-2">
-        ${links}
-        </ul>
-        <div class="mt-8 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-            <p class="text-yellow-800 text-sm">Note: The AI didn't create a proper index.html. You may want to regenerate.</p>
-        </div>
+<body>
+    <h1>Project Files</h1>
+    <p>The AI created the following files:</p>
+    <ul>
+    ${links}
+    </ul>
+    <div class="note">
+        <p>Note: The AI didn't create a proper index.html. You may want to regenerate.</p>
     </div>
 </body>
 </html>`;
