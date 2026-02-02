@@ -1186,6 +1186,7 @@ async function runSimpleGeneration(
   // Retry logic for transient errors
   let response: Response | null = null;
   let lastError = '';
+  let responseBodyText: string | null = null; // Track consumed body to avoid "Body already consumed" error
   const maxRetries = 3;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -1202,16 +1203,18 @@ async function runSimpleGeneration(
 
       // Retry on transient errors
       if (response.status === 429 || response.status >= 500) {
-        const errorBody = await response.text();
-        lastError = `HTTP ${response.status}: ${errorBody}`;
+        responseBodyText = await response.text();
+        lastError = `HTTP ${response.status}: ${responseBodyText}`;
         console.warn(`[simple] Transient error, retrying in ${attempt}s...`);
         await new Promise(r => setTimeout(r, attempt * 1000));
         continue;
       }
 
+      responseBodyText = null; // Reset for successful response
       break; // Success or non-retryable error
     } catch (fetchError) {
       lastError = fetchError.message;
+      responseBodyText = null;
       if (attempt < maxRetries) {
         console.warn(`[simple] Fetch error, retrying: ${fetchError.message}`);
         await new Promise(r => setTimeout(r, attempt * 1000));
@@ -1224,7 +1227,8 @@ async function runSimpleGeneration(
   }
 
   if (!response.ok) {
-    const errorBody = await response.text();
+    // Use already-consumed body from retry loop, or read fresh if not consumed
+    const errorBody = responseBodyText ?? await response.text();
     let errorMsg = `API error: ${response.status}`;
     let providerError = '';
     try {
@@ -1433,6 +1437,7 @@ async function runAgentGeneration(
       // Enhanced retry logic with specific handling for different error types
       let response: Response | null = null;
       let lastError = '';
+      let responseBodyText: string | null = null; // Track consumed body to avoid "Body already consumed" error
       let routingRetryCount = 0;
       let rateLimitRetryCount = 0;
       const maxTransientRetries = 3;
@@ -1458,8 +1463,8 @@ async function runAgentGeneration(
 
             // Retry on server errors (5xx)
             if (response.status >= 500) {
-              const errorBody = await response.text();
-              lastError = `HTTP ${response.status}: ${errorBody}`;
+              responseBodyText = await response.text();
+              lastError = `HTTP ${response.status}: ${responseBodyText}`;
               console.warn(`[process-job] Server error, retrying in ${attempt}s...`);
               await updateJobStatus(serviceClient, jobData.id,
                 `Server error, retrying... (attempt ${attempt}/${maxTransientRetries})`
@@ -1467,6 +1472,8 @@ async function runAgentGeneration(
               await new Promise(r => setTimeout(r, attempt * 1000));
               continue;
             }
+
+            responseBodyText = null; // Reset for successful response
 
             break; // Got a response (success or client error)
           } catch (fetchError) {
@@ -1488,7 +1495,9 @@ async function runAgentGeneration(
 
         // Check for retryable errors that need longer waits
         if (!response.ok) {
-          const errorBody = await response.text();
+          // Use already-consumed body from retry loop, or read fresh if not consumed
+          const errorBody = responseBodyText ?? await response.text();
+          responseBodyText = errorBody; // Store in case we need it later
           let errorMsg = `API error: ${response.status}`;
           try {
             const errorJson = JSON.parse(errorBody);
@@ -1512,6 +1521,7 @@ async function runAgentGeneration(
               );
               await new Promise(r => setTimeout(r, delay));
               response = null; // Reset for next attempt
+              responseBodyText = null;
               continue;
             }
             // Max retries exceeded for routing
@@ -1540,6 +1550,7 @@ async function runAgentGeneration(
               );
               await new Promise(r => setTimeout(r, delay));
               response = null; // Reset for next attempt
+              responseBodyText = null;
               continue;
             }
             throw new Error('Rate limit exceeded after multiple retries. Please wait a few minutes and try again.');
@@ -1559,7 +1570,8 @@ async function runAgentGeneration(
       }
 
       if (!response.ok) {
-        const errorBody = await response.text();
+        // Use already-consumed body from retry loop, or read fresh if not consumed
+        const errorBody = responseBodyText ?? await response.text();
         let errorMsg = `API error: ${response.status}`;
         let errorDetails: Record<string, unknown> = { status: response.status, body: errorBody.substring(0, 500) };
         let providerError = '';
