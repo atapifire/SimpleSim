@@ -742,11 +742,20 @@ export async function unlockSession(pin, options = {}) {
     // Store session token
     sessionStorage.setItem('simplesim_session_token', data.sessionToken);
 
-    // Store API key in memory BEFORE setting sessionUnlocked flag
-    // This ensures getApiKey() will return the correct value when event fires
+    // Store API key in memory AND sessionStorage (survives page refresh, clears on browser close)
+    // This prevents having to re-unlock on every page refresh while maintaining security
     state.serverApiKey = data.apiKey;
     state.sessionExpiresAt = new Date(data.expiresAt);
     state.sessionUnlocked = true;
+
+    // Persist to sessionStorage for page refresh survival
+    try {
+        sessionStorage.setItem('simplesim_api_key', data.apiKey);
+        sessionStorage.setItem('simplesim_session_expires', data.expiresAt);
+        devLog('API key stored in sessionStorage for page refresh survival');
+    } catch (e) {
+        devError('Failed to store API key in sessionStorage:', e);
+    }
 
     devLog('API key stored in memory for session');
     devLog('Session unlocked until', data.expiresAt);
@@ -991,6 +1000,32 @@ export async function checkSessionStatus() {
         }
 
         const hasDbSession = sessions && sessions.length > 0;
+
+        // Try to restore API key from sessionStorage if not in memory (survives page refresh)
+        if (!state.serverApiKey) {
+            try {
+                const storedKey = sessionStorage.getItem('simplesim_api_key');
+                const storedExpiry = sessionStorage.getItem('simplesim_session_expires');
+
+                if (storedKey && storedExpiry) {
+                    const expiryDate = new Date(storedExpiry);
+                    if (expiryDate > new Date()) {
+                        devLog('Restoring API key from sessionStorage (page refresh recovery)');
+                        state.serverApiKey = storedKey;
+                        state.sessionExpiresAt = expiryDate;
+                        state.sessionUnlocked = true;
+                    } else {
+                        devLog('Stored session expired, clearing sessionStorage');
+                        sessionStorage.removeItem('simplesim_api_key');
+                        sessionStorage.removeItem('simplesim_session_expires');
+                        sessionStorage.removeItem('simplesim_session_token');
+                    }
+                }
+            } catch (e) {
+                devError('Failed to restore API key from sessionStorage:', e);
+            }
+        }
+
         const hasApiKey = !!state.serverApiKey;
 
         if (hasDbSession) {
@@ -1519,6 +1554,11 @@ export async function clearServerKey() {
     state.sessionUnlocked = false;
     state.serverApiKey = null;
     state.sessionExpiresAt = null;
+
+    // Clear sessionStorage (page refresh recovery data)
+    sessionStorage.removeItem('simplesim_api_key');
+    sessionStorage.removeItem('simplesim_session_expires');
+    sessionStorage.removeItem('simplesim_session_token');
 
     // Also invalidate server-side session to prevent stale sessions being used
     try {

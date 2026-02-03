@@ -24,6 +24,103 @@ function isESModule(jsContent) {
 }
 
 /**
+ * Common library CDN mappings for import maps
+ * These allow bare specifiers like `import * as THREE from 'three'` to work
+ */
+const LIBRARY_CDN_MAP = {
+    'three': 'https://esm.sh/three@0.160.0',
+    'three/': 'https://esm.sh/three@0.160.0/',
+    'three/addons/': 'https://esm.sh/three@0.160.0/addons/',
+    'three/examples/jsm/': 'https://esm.sh/three@0.160.0/examples/jsm/',
+    '@tweenjs/tween.js': 'https://esm.sh/@tweenjs/tween.js@23.1.1',
+    'gsap': 'https://esm.sh/gsap@3.12.5',
+    'anime': 'https://esm.sh/animejs@3.2.2',
+    'animejs': 'https://esm.sh/animejs@3.2.2',
+    'd3': 'https://esm.sh/d3@7.8.5',
+    'chart.js': 'https://esm.sh/chart.js@4.4.1',
+    'pixi.js': 'https://esm.sh/pixi.js@7.4.0',
+    'matter-js': 'https://esm.sh/matter-js@0.19.0',
+    'p5': 'https://esm.sh/p5@1.9.0',
+    'lodash': 'https://esm.sh/lodash-es@4.17.21',
+    'lodash-es': 'https://esm.sh/lodash-es@4.17.21',
+    'dayjs': 'https://esm.sh/dayjs@1.11.10',
+    'uuid': 'https://esm.sh/uuid@9.0.1',
+    'nipplejs': 'https://esm.sh/nipplejs@0.10.1',
+};
+
+/**
+ * Detect bare specifiers in JavaScript code that would need import map
+ * @param {string} jsContent - JavaScript code to analyze
+ * @returns {string[]} Array of bare specifier names found
+ */
+function detectBareSpecifiers(jsContent) {
+    if (!jsContent) return [];
+
+    const found = new Set();
+
+    // Match import statements with bare specifiers (not starting with ./ or ../ or http)
+    // import X from 'specifier'
+    // import { X } from 'specifier'
+    // import * as X from 'specifier'
+    const importRegex = /\bfrom\s+['"]([^'"./][^'"]*)['"]/g;
+    let match;
+    while ((match = importRegex.exec(jsContent)) !== null) {
+        const specifier = match[1];
+        // Check if it's in our known library map
+        for (const key of Object.keys(LIBRARY_CDN_MAP)) {
+            if (specifier === key || specifier.startsWith(key)) {
+                found.add(key);
+            }
+        }
+    }
+
+    // Also check for dynamic imports
+    const dynamicImportRegex = /\bimport\s*\(\s*['"]([^'"./][^'"]*)['"]\s*\)/g;
+    while ((match = dynamicImportRegex.exec(jsContent)) !== null) {
+        const specifier = match[1];
+        for (const key of Object.keys(LIBRARY_CDN_MAP)) {
+            if (specifier === key || specifier.startsWith(key)) {
+                found.add(key);
+            }
+        }
+    }
+
+    return Array.from(found);
+}
+
+/**
+ * Generate an import map script tag for the given specifiers
+ * @param {string[]} specifiers - Bare specifier names to include
+ * @returns {string} HTML script tag with import map
+ */
+function generateImportMap(specifiers) {
+    const imports = {};
+
+    for (const spec of specifiers) {
+        if (LIBRARY_CDN_MAP[spec]) {
+            imports[spec] = LIBRARY_CDN_MAP[spec];
+        }
+        // Also add subpath mappings if applicable
+        const subpathKey = spec + '/';
+        if (LIBRARY_CDN_MAP[subpathKey]) {
+            imports[subpathKey] = LIBRARY_CDN_MAP[subpathKey];
+        }
+    }
+
+    // Special handling for three.js - include common subpaths
+    if (imports['three']) {
+        imports['three/addons/'] = 'https://esm.sh/three@0.160.0/addons/';
+        imports['three/examples/jsm/'] = 'https://esm.sh/three@0.160.0/examples/jsm/';
+    }
+
+    const importMapJson = JSON.stringify({ imports }, null, 2);
+
+    return `<script type="importmap">
+${importMapJson}
+</script>`;
+}
+
+/**
  * Preview Error Store
  * Captures JavaScript errors and console messages from the preview iframe
  * for feeding back to the Agent during iteration
@@ -276,6 +373,23 @@ export function renderProject(files) {
         if (needsModule) {
             devLog('Injected JS uses ES modules, adding type="module"');
         }
+
+        // Check if JS uses bare specifiers that need import map
+        const needsImportMap = needsModule && detectBareSpecifiers(allJs);
+        if (needsImportMap.length > 0) {
+            const importMap = generateImportMap(needsImportMap);
+            devLog('Adding import map for:', needsImportMap);
+
+            // Import map must be added before any module scripts
+            if (combinedHTML.includes('<head>')) {
+                combinedHTML = combinedHTML.replace('<head>', `<head>\n${importMap}`);
+            } else if (combinedHTML.includes('<html>')) {
+                combinedHTML = combinedHTML.replace('<html>', `<html>\n<head>${importMap}</head>`);
+            } else {
+                combinedHTML = importMap + combinedHTML;
+            }
+        }
+
         const jsTag = `<script${moduleAttr}>\n${allJs}\n</script>`;
         if (combinedHTML.includes('</body>')) {
             combinedHTML = combinedHTML.replace('</body>', `${jsTag}\n</body>`);
